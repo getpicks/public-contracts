@@ -1,0 +1,15 @@
+{
+	"name": "@maginot/contracts",
+	"version": "0.0.1",
+	"private": true,
+	"description": "Smart contracts for Maginot betting platform",
+	"scripts": {
+		"build": "forge build",
+		"test": "forge test",
+		"deploy": "forge script script/Deploy.s.sol --rpc-url $RPC_URL --broadcast",
+		"verify": "forge verify-contract"
+	},
+	"devDependencies": {
+		"@openzeppelin/contracts": "^5.0.0"
+	}
+}
