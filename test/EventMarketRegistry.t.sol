@@ -29,7 +29,9 @@ contract EventMarketRegistryTest is Test {
 		EventMarketRegistry impl = new EventMarketRegistry();
 		bytes memory initData = abi.encodeCall(EventMarketRegistry.initialize, (authority, owner));
 		TransparentUpgradeableProxy proxy = new TransparentUpgradeableProxy(
-			address(impl), makeAddr("proxyAdmin"), initData
+			address(impl),
+			makeAddr("proxyAdmin"),
+			initData
 		);
 		registry = EventMarketRegistry(address(proxy));
 
@@ -50,7 +52,14 @@ contract EventMarketRegistryTest is Test {
 		uint256 deadline
 	) internal view returns (bytes memory) {
 		bytes32 hash = keccak256(
-			abi.encode(SETTLE_EVENT_TYPEHASH, block.chainid, address(registry), marketId, outcomeId, deadline)
+			abi.encode(
+				SETTLE_EVENT_TYPEHASH,
+				block.chainid,
+				address(registry),
+				marketId,
+				outcomeId,
+				deadline
+			)
 		).toEthSignedMessageHash();
 		(uint8 v, bytes32 r, bytes32 s) = vm.sign(authorityPk, hash);
 		return abi.encodePacked(r, s, v);
@@ -71,7 +80,15 @@ contract EventMarketRegistryTest is Test {
 		uint256 deadline
 	) internal view returns (bytes memory) {
 		bytes32 hash = keccak256(
-			abi.encode(UPDATE_EVENT_MARKET_TYPEHASH, block.chainid, address(registry), marketId, newTs, nonce, deadline)
+			abi.encode(
+				UPDATE_EVENT_MARKET_TYPEHASH,
+				block.chainid,
+				address(registry),
+				marketId,
+				newTs,
+				nonce,
+				deadline
+			)
 		).toEthSignedMessageHash();
 		(uint8 v, bytes32 r, bytes32 s) = vm.sign(authorityPk, hash);
 		return abi.encodePacked(r, s, v);
@@ -160,7 +177,12 @@ contract EventMarketRegistryTest is Test {
 		// settle it
 		vm.warp(ts);
 		uint256 deadline = block.timestamp + 1 hours;
-		registry.settleEventMarket(MARKET_ID, OUTCOME_A, deadline, _signSettle(MARKET_ID, OUTCOME_A, deadline));
+		registry.settleEventMarket(
+			MARKET_ID,
+			OUTCOME_A,
+			deadline,
+			_signSettle(MARKET_ID, OUTCOME_A, deadline)
+		);
 
 		// try ensureExists on settled market
 		vm.prank(writer);
@@ -212,7 +234,12 @@ contract EventMarketRegistryTest is Test {
 	function test_settle_revertsIfNotExists() public {
 		uint256 deadline = block.timestamp + 1 hours;
 		vm.expectRevert(EventMarketRegistry.EventMarketDoesNotExist.selector);
-		registry.settleEventMarket(MARKET_ID, OUTCOME_A, deadline, _signSettle(MARKET_ID, OUTCOME_A, deadline));
+		registry.settleEventMarket(
+			MARKET_ID,
+			OUTCOME_A,
+			deadline,
+			_signSettle(MARKET_ID, OUTCOME_A, deadline)
+		);
 	}
 
 	function test_settle_revertsIfAlreadySettled() public {
@@ -221,10 +248,20 @@ contract EventMarketRegistryTest is Test {
 		vm.warp(ts);
 
 		uint256 deadline = block.timestamp + 1 hours;
-		registry.settleEventMarket(MARKET_ID, OUTCOME_A, deadline, _signSettle(MARKET_ID, OUTCOME_A, deadline));
+		registry.settleEventMarket(
+			MARKET_ID,
+			OUTCOME_A,
+			deadline,
+			_signSettle(MARKET_ID, OUTCOME_A, deadline)
+		);
 
 		vm.expectRevert(EventMarketRegistry.EventMarketAlreadySettled.selector);
-		registry.settleEventMarket(MARKET_ID, OUTCOME_A, deadline, _signSettle(MARKET_ID, OUTCOME_A, deadline));
+		registry.settleEventMarket(
+			MARKET_ID,
+			OUTCOME_A,
+			deadline,
+			_signSettle(MARKET_ID, OUTCOME_A, deadline)
+		);
 	}
 
 	function test_settle_revertsTooEarly() public {
@@ -234,7 +271,12 @@ contract EventMarketRegistryTest is Test {
 
 		uint256 deadline = block.timestamp + 2 hours;
 		vm.expectRevert(EventMarketRegistry.TooEarlyToSettle.selector);
-		registry.settleEventMarket(MARKET_ID, OUTCOME_A, deadline, _signSettle(MARKET_ID, OUTCOME_A, deadline));
+		registry.settleEventMarket(
+			MARKET_ID,
+			OUTCOME_A,
+			deadline,
+			_signSettle(MARKET_ID, OUTCOME_A, deadline)
+		);
 	}
 
 	function test_settle_revertsZeroOutcome() public {
@@ -244,7 +286,12 @@ contract EventMarketRegistryTest is Test {
 
 		uint256 deadline = block.timestamp + 1 hours;
 		vm.expectRevert(EventMarketRegistry.InvalidInput.selector);
-		registry.settleEventMarket(MARKET_ID, bytes12(0), deadline, _signSettle(MARKET_ID, bytes12(0), deadline));
+		registry.settleEventMarket(
+			MARKET_ID,
+			bytes12(0),
+			deadline,
+			_signSettle(MARKET_ID, bytes12(0), deadline)
+		);
 	}
 
 	function test_settle_revertsExpiredSignature() public {
@@ -254,7 +301,12 @@ contract EventMarketRegistryTest is Test {
 
 		uint256 deadline = block.timestamp - 1; // expired
 		vm.expectRevert(EventMarketRegistry.SignatureExpired.selector);
-		registry.settleEventMarket(MARKET_ID, OUTCOME_A, deadline, _signSettle(MARKET_ID, OUTCOME_A, deadline));
+		registry.settleEventMarket(
+			MARKET_ID,
+			OUTCOME_A,
+			deadline,
+			_signSettle(MARKET_ID, OUTCOME_A, deadline)
+		);
 	}
 
 	function test_settle_revertsInvalidSignature() public {
@@ -266,7 +318,14 @@ contract EventMarketRegistryTest is Test {
 		// sign with wrong key
 		uint256 wrongPk = 0xBEEF;
 		bytes32 hash = keccak256(
-			abi.encode(SETTLE_EVENT_TYPEHASH, block.chainid, address(registry), MARKET_ID, OUTCOME_A, deadline)
+			abi.encode(
+				SETTLE_EVENT_TYPEHASH,
+				block.chainid,
+				address(registry),
+				MARKET_ID,
+				OUTCOME_A,
+				deadline
+			)
 		).toEthSignedMessageHash();
 		(uint8 v, bytes32 r, bytes32 s) = vm.sign(wrongPk, hash);
 		bytes memory badSig = abi.encodePacked(r, s, v);
@@ -285,7 +344,12 @@ contract EventMarketRegistryTest is Test {
 
 		uint256 deadline = block.timestamp + 1 hours;
 		vm.expectRevert();
-		registry.settleEventMarket(MARKET_ID, OUTCOME_A, deadline, _signSettle(MARKET_ID, OUTCOME_A, deadline));
+		registry.settleEventMarket(
+			MARKET_ID,
+			OUTCOME_A,
+			deadline,
+			_signSettle(MARKET_ID, OUTCOME_A, deadline)
+		);
 	}
 
 	// ─── voidEventMarket ───
@@ -373,13 +437,23 @@ contract EventMarketRegistryTest is Test {
 
 		uint40 newTs = uint40(block.timestamp + 2 hours);
 		uint256 deadline = block.timestamp + 1 hours;
-		registry.updateEventMarket(MARKET_ID, newTs, deadline, _signUpdate(MARKET_ID, newTs, 0, deadline));
+		registry.updateEventMarket(
+			MARKET_ID,
+			newTs,
+			deadline,
+			_signUpdate(MARKET_ID, newTs, 0, deadline)
+		);
 
 		assertEq(registry.automated_authority_nonce(), 1);
 
 		// second update needs nonce=1
 		uint40 newTs2 = uint40(block.timestamp + 3 hours);
-		registry.updateEventMarket(MARKET_ID, newTs2, deadline, _signUpdate(MARKET_ID, newTs2, 1, deadline));
+		registry.updateEventMarket(
+			MARKET_ID,
+			newTs2,
+			deadline,
+			_signUpdate(MARKET_ID, newTs2, 1, deadline)
+		);
 
 		assertEq(registry.automated_authority_nonce(), 2);
 	}
@@ -391,18 +465,33 @@ contract EventMarketRegistryTest is Test {
 		uint40 newTs = uint40(block.timestamp + 2 hours);
 		uint256 deadline = block.timestamp + 1 hours;
 		// do first update (nonce 0 → 1)
-		registry.updateEventMarket(MARKET_ID, newTs, deadline, _signUpdate(MARKET_ID, newTs, 0, deadline));
+		registry.updateEventMarket(
+			MARKET_ID,
+			newTs,
+			deadline,
+			_signUpdate(MARKET_ID, newTs, 0, deadline)
+		);
 
 		// try to replay with nonce 0
 		vm.expectRevert(EventMarketRegistry.InvalidSignature.selector);
-		registry.updateEventMarket(MARKET_ID, newTs, deadline, _signUpdate(MARKET_ID, newTs, 0, deadline));
+		registry.updateEventMarket(
+			MARKET_ID,
+			newTs,
+			deadline,
+			_signUpdate(MARKET_ID, newTs, 0, deadline)
+		);
 	}
 
 	function test_update_revertsIfNotExists() public {
 		uint256 deadline = block.timestamp + 1 hours;
 		uint40 newTs = uint40(block.timestamp + 2 hours);
 		vm.expectRevert(EventMarketRegistry.EventMarketDoesNotExist.selector);
-		registry.updateEventMarket(MARKET_ID, newTs, deadline, _signUpdate(MARKET_ID, newTs, 0, deadline));
+		registry.updateEventMarket(
+			MARKET_ID,
+			newTs,
+			deadline,
+			_signUpdate(MARKET_ID, newTs, 0, deadline)
+		);
 	}
 
 	function test_update_revertsIfSettled() public {
@@ -411,11 +500,21 @@ contract EventMarketRegistryTest is Test {
 		vm.warp(ts);
 
 		uint256 deadline = block.timestamp + 1 hours;
-		registry.settleEventMarket(MARKET_ID, OUTCOME_A, deadline, _signSettle(MARKET_ID, OUTCOME_A, deadline));
+		registry.settleEventMarket(
+			MARKET_ID,
+			OUTCOME_A,
+			deadline,
+			_signSettle(MARKET_ID, OUTCOME_A, deadline)
+		);
 
 		uint40 newTs = uint40(block.timestamp + 2 hours);
 		vm.expectRevert(EventMarketRegistry.EventMarketAlreadySettled.selector);
-		registry.updateEventMarket(MARKET_ID, newTs, deadline, _signUpdate(MARKET_ID, newTs, 0, deadline));
+		registry.updateEventMarket(
+			MARKET_ID,
+			newTs,
+			deadline,
+			_signUpdate(MARKET_ID, newTs, 0, deadline)
+		);
 	}
 
 	// ─── Admin: authorized writers ───
@@ -440,7 +539,9 @@ contract EventMarketRegistryTest is Test {
 
 	function test_addAuthorizedWriter_revertsNonOwner() public {
 		vm.prank(stranger);
-		vm.expectRevert(abi.encodeWithSelector(EventMarketRegistry.OwnableUnauthorizedAccount.selector, stranger));
+		vm.expectRevert(
+			abi.encodeWithSelector(EventMarketRegistry.OwnableUnauthorizedAccount.selector, stranger)
+		);
 		registry.addAuthorizedWriter(makeAddr("x"));
 	}
 
@@ -471,7 +572,9 @@ contract EventMarketRegistryTest is Test {
 
 	function test_updateConfiguration_revertsNonOwner() public {
 		vm.prank(stranger);
-		vm.expectRevert(abi.encodeWithSelector(EventMarketRegistry.OwnableUnauthorizedAccount.selector, stranger));
+		vm.expectRevert(
+			abi.encodeWithSelector(EventMarketRegistry.OwnableUnauthorizedAccount.selector, stranger)
+		);
 		registry.updateConfiguration(makeAddr("x"));
 	}
 
@@ -495,7 +598,9 @@ contract EventMarketRegistryTest is Test {
 
 	function test_pause_revertsNonOwner() public {
 		vm.prank(stranger);
-		vm.expectRevert(abi.encodeWithSelector(EventMarketRegistry.OwnableUnauthorizedAccount.selector, stranger));
+		vm.expectRevert(
+			abi.encodeWithSelector(EventMarketRegistry.OwnableUnauthorizedAccount.selector, stranger)
+		);
 		registry.pause();
 	}
 
@@ -512,13 +617,17 @@ contract EventMarketRegistryTest is Test {
 
 	function test_transferOwnership_revertsZeroAddress() public {
 		vm.prank(owner);
-		vm.expectRevert(abi.encodeWithSelector(EventMarketRegistry.OwnableInvalidOwner.selector, address(0)));
+		vm.expectRevert(
+			abi.encodeWithSelector(EventMarketRegistry.OwnableInvalidOwner.selector, address(0))
+		);
 		registry.transferOwnership(address(0));
 	}
 
 	function test_transferOwnership_revertsNonOwner() public {
 		vm.prank(stranger);
-		vm.expectRevert(abi.encodeWithSelector(EventMarketRegistry.OwnableUnauthorizedAccount.selector, stranger));
+		vm.expectRevert(
+			abi.encodeWithSelector(EventMarketRegistry.OwnableUnauthorizedAccount.selector, stranger)
+		);
 		registry.transferOwnership(makeAddr("x"));
 	}
 }

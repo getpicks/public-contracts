@@ -13,25 +13,49 @@ import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 
 contract MockUSDC is ERC20 {
 	constructor() ERC20("USDC", "USDC") {}
-	function decimals() public pure override returns (uint8) { return 6; }
-	function mint(address to, uint256 amount) external { _mint(to, amount); }
+
+	function decimals() public pure override returns (uint8) {
+		return 6;
+	}
+
+	function mint(address to, uint256 amount) external {
+		_mint(to, amount);
+	}
 }
 
 contract MockCreditToken is ERC20 {
 	constructor() ERC20("Credit", "CRED") {}
-	function decimals() public pure override returns (uint8) { return 18; }
-	function mint(address to, uint256 amount) external { _mint(to, amount); }
-	function burn(uint256 amount) external { _burn(msg.sender, amount); }
+
+	function decimals() public pure override returns (uint8) {
+		return 18;
+	}
+
+	function mint(address to, uint256 amount) external {
+		_mint(to, amount);
+	}
+
+	function burn(uint256 amount) external {
+		_burn(msg.sender, amount);
+	}
 }
 
 // ─── Mock Treasury ───
 
 contract MockHotTreasury {
 	address public immutable CREDIT_TOKEN_ADDRESS;
-	constructor(address _creditToken) { CREDIT_TOKEN_ADDRESS = _creditToken; }
+	address public immutable COIN_ADDRESS;
 
-	function drain(address token, address to, uint256 amount) external {
-		ERC20(token).transfer(to, amount);
+	constructor(address _creditToken, address _coin) {
+		CREDIT_TOKEN_ADDRESS = _creditToken;
+		COIN_ADDRESS = _coin;
+	}
+
+	function depositFor(address user, address token, uint256 amount) external {
+		ERC20(token).transferFrom(user, address(this), amount);
+	}
+
+	function drain(address to, uint256 amount) external {
+		ERC20(COIN_ADDRESS).transfer(to, amount);
 	}
 
 	function burnCredit(uint256 amount) external {
@@ -60,6 +84,7 @@ contract FlexComboMachineTest is Test {
 
 	bytes32 internal constant PLACE_BET_TYPEHASH = keccak256("placeBet");
 	bytes32 internal constant SETTLE_BET_TYPEHASH = keccak256("settleBet");
+	bytes32 internal constant CANCEL_BET_TYPEHASH = keccak256("cancelBet");
 	bytes32 internal constant SETTLE_EVENT_TYPEHASH = keccak256("settleEventMarket");
 	bytes32 internal constant VOID_EVENT_TYPEHASH = keccak256("voidEventMarket");
 
@@ -74,13 +99,18 @@ contract FlexComboMachineTest is Test {
 		// Deploy tokens
 		usdc = new MockUSDC();
 		creditToken = new MockCreditToken();
-		treasury = new MockHotTreasury(address(creditToken));
+		treasury = new MockHotTreasury(address(creditToken), address(usdc));
 
 		// Deploy registry via proxy
 		EventMarketRegistry regImpl = new EventMarketRegistry();
-		bytes memory regInit = abi.encodeCall(EventMarketRegistry.initialize, (authority, contractOwner));
+		bytes memory regInit = abi.encodeCall(
+			EventMarketRegistry.initialize,
+			(authority, contractOwner)
+		);
 		TransparentUpgradeableProxy regProxy = new TransparentUpgradeableProxy(
-			address(regImpl), makeAddr("regAdmin"), regInit
+			address(regImpl),
+			makeAddr("regAdmin"),
+			regInit
 		);
 		registry = EventMarketRegistry(address(regProxy));
 
@@ -101,7 +131,9 @@ contract FlexComboMachineTest is Test {
 			)
 		);
 		TransparentUpgradeableProxy flexProxy = new TransparentUpgradeableProxy(
-			address(flexImpl), makeAddr("flexAdmin"), flexInit
+			address(flexImpl),
+			makeAddr("flexAdmin"),
+			flexInit
 		);
 		flex = FlexComboMachine(address(flexProxy));
 
@@ -122,24 +154,38 @@ contract FlexComboMachineTest is Test {
 		uint256[][] memory mults = new uint256[][](4);
 
 		mults[0] = new uint256[](3);
-		mults[0][0] = 300; mults[0][1] = 100; mults[0][2] = 0;
+		mults[0][0] = 300;
+		mults[0][1] = 100;
+		mults[0][2] = 0;
 
 		mults[1] = new uint256[](4);
-		mults[1][0] = 600; mults[1][1] = 150; mults[1][2] = 0; mults[1][3] = 0;
+		mults[1][0] = 600;
+		mults[1][1] = 150;
+		mults[1][2] = 0;
+		mults[1][3] = 0;
 
 		mults[2] = new uint256[](5);
-		mults[2][0] = 1000; mults[2][1] = 200; mults[2][2] = 40; mults[2][3] = 0; mults[2][4] = 0;
+		mults[2][0] = 1000;
+		mults[2][1] = 200;
+		mults[2][2] = 40;
+		mults[2][3] = 0;
+		mults[2][4] = 0;
 
 		mults[3] = new uint256[](6);
-		mults[3][0] = 2500; mults[3][1] = 200; mults[3][2] = 40; mults[3][3] = 0; mults[3][4] = 0; mults[3][5] = 0;
+		mults[3][0] = 2500;
+		mults[3][1] = 200;
+		mults[3][2] = 40;
+		mults[3][3] = 0;
+		mults[3][4] = 0;
+		mults[3][5] = 0;
 
 		vm.prank(contractOwner);
 		flex.addMultiplierConfig(mults);
 
-		// Fund bettor with USDC and approve
+		// Fund bettor with USDC and approve treasury
 		usdc.mint(bettor, 1_000_000e6);
 		vm.prank(bettor);
-		usdc.approve(address(flex), type(uint256).max);
+		usdc.approve(address(treasury), type(uint256).max);
 
 		// Fund treasury with USDC for payouts
 		usdc.mint(address(treasury), 10_000_000e6);
@@ -147,11 +193,17 @@ contract FlexComboMachineTest is Test {
 
 	// ─── Helpers ───
 
-	function _picks(uint96[] memory marketIds, uint96[] memory outcomeIds)
-		internal view returns (FlexComboMachine.Pick[] memory, FlexComboMachine.LazyCreateEventMarket[] memory)
+	function _picks(
+		uint96[] memory marketIds,
+		uint96[] memory outcomeIds
+	)
+		internal
+		view
+		returns (FlexComboMachine.Pick[] memory, FlexComboMachine.LazyCreateEventMarket[] memory)
 	{
 		FlexComboMachine.Pick[] memory picks = new FlexComboMachine.Pick[](marketIds.length);
-		FlexComboMachine.LazyCreateEventMarket[] memory lazys = new FlexComboMachine.LazyCreateEventMarket[](marketIds.length);
+		FlexComboMachine.LazyCreateEventMarket[]
+			memory lazys = new FlexComboMachine.LazyCreateEventMarket[](marketIds.length);
 		for (uint256 i = 0; i < marketIds.length; i++) {
 			picks[i] = FlexComboMachine.Pick({
 				event_market_id: bytes12(marketIds[i]),
@@ -178,8 +230,17 @@ contract FlexComboMachineTest is Test {
 	) internal view returns (bytes memory) {
 		bytes32 hash = keccak256(
 			abi.encode(
-				PLACE_BET_TYPEHASH, block.chainid, address(flex),
-				owner_, picks, lazys, betSize, configId, deadline, nonce, tokenType
+				PLACE_BET_TYPEHASH,
+				block.chainid,
+				address(flex),
+				owner_,
+				picks,
+				lazys,
+				betSize,
+				configId,
+				deadline,
+				nonce,
+				tokenType
 			)
 		).toEthSignedMessageHash();
 		(uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, hash);
@@ -198,19 +259,26 @@ contract FlexComboMachineTest is Test {
 		return abi.encodePacked(r, s, v);
 	}
 
-	function _signSettleEvent(bytes12 marketId, bytes12 outcomeId, uint256 deadline)
-		internal view returns (bytes memory)
-	{
+	function _signSettleEvent(
+		bytes12 marketId,
+		bytes12 outcomeId,
+		uint256 deadline
+	) internal view returns (bytes memory) {
 		bytes32 hash = keccak256(
-			abi.encode(SETTLE_EVENT_TYPEHASH, block.chainid, address(registry), marketId, outcomeId, deadline)
+			abi.encode(
+				SETTLE_EVENT_TYPEHASH,
+				block.chainid,
+				address(registry),
+				marketId,
+				outcomeId,
+				deadline
+			)
 		).toEthSignedMessageHash();
 		(uint8 v, bytes32 r, bytes32 s) = vm.sign(authorityPk, hash);
 		return abi.encodePacked(r, s, v);
 	}
 
-	function _signVoidEvent(bytes12 marketId, uint256 deadline)
-		internal view returns (bytes memory)
-	{
+	function _signVoidEvent(bytes12 marketId, uint256 deadline) internal view returns (bytes memory) {
 		bytes32 hash = keccak256(
 			abi.encode(VOID_EVENT_TYPEHASH, block.chainid, address(registry), marketId, deadline)
 		).toEthSignedMessageHash();
@@ -218,74 +286,174 @@ contract FlexComboMachineTest is Test {
 		return abi.encodePacked(r, s, v);
 	}
 
-	/// @dev Places a standard 3-pick bet with USDC, returns bet_id
-	function _placeDefaultBet() internal returns (
+	function _signCancelBet(
+		address owner_,
 		uint256 betId,
 		FlexComboMachine.Pick[] memory picks,
-		FlexComboMachine.LazyCreateEventMarket[] memory lazys
-	) {
+		uint256 deadline,
+		uint256 nonce,
+		uint256 pk
+	) internal view returns (bytes memory) {
+		bytes32 hash = keccak256(
+			abi.encode(
+				CANCEL_BET_TYPEHASH,
+				block.chainid,
+				address(flex),
+				owner_,
+				betId,
+				picks,
+				deadline,
+				nonce
+			)
+		).toEthSignedMessageHash();
+		(uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, hash);
+		return abi.encodePacked(r, s, v);
+	}
+
+	/// @dev Places a standard 3-pick bet with USDC, returns bet_id
+	function _placeDefaultBet()
+		internal
+		returns (
+			uint256 betId,
+			FlexComboMachine.Pick[] memory picks,
+			FlexComboMachine.LazyCreateEventMarket[] memory lazys
+		)
+	{
 		return _placeDefaultBetWithSize(10e18); // 10 USDC in 18 decimals
 	}
 
-	function _placeDefaultBetWithSize(uint128 betSize) internal returns (
-		uint256 betId,
-		FlexComboMachine.Pick[] memory picks,
-		FlexComboMachine.LazyCreateEventMarket[] memory lazys
-	) {
+	function _placeDefaultBetWithSize(
+		uint128 betSize
+	)
+		internal
+		returns (
+			uint256 betId,
+			FlexComboMachine.Pick[] memory picks,
+			FlexComboMachine.LazyCreateEventMarket[] memory lazys
+		)
+	{
 		uint96[] memory mids = new uint96[](3);
-		mids[0] = 1; mids[1] = 2; mids[2] = 3;
+		mids[0] = 1;
+		mids[1] = 2;
+		mids[2] = 3;
 		uint96[] memory oids = new uint96[](3);
-		oids[0] = 100; oids[1] = 200; oids[2] = 300;
+		oids[0] = 100;
+		oids[1] = 200;
+		oids[2] = 300;
 		(picks, lazys) = _picks(mids, oids);
 
 		uint256 deadline = block.timestamp + 1 hours;
 		uint256 nonce = flex.wallet_nonce(bettor);
 
-		bytes memory authSig = _signPlaceBet(picks, lazys, betSize, 0, bettor, deadline, nonce, 0, authorityPk);
-		bytes memory ownerSig = _signPlaceBet(picks, lazys, betSize, 0, bettor, deadline, nonce, 0, bettorPk);
+		bytes memory authSig = _signPlaceBet(
+			picks,
+			lazys,
+			betSize,
+			0,
+			bettor,
+			deadline,
+			nonce,
+			0,
+			authorityPk
+		);
+		bytes memory ownerSig = _signPlaceBet(
+			picks,
+			lazys,
+			betSize,
+			0,
+			bettor,
+			deadline,
+			nonce,
+			0,
+			bettorPk
+		);
 
-		flex.placeBet(FlexComboMachine.PlaceBetParams({
-			picks: picks,
-			lazy_create_event_markets: lazys,
-			bet_size: betSize,
-			multipliers_config_id: 0,
-			bet_owner: bettor,
-			deadline: deadline,
-			token_type: 0,
-			automated_authority_signature: authSig,
-			owner_signature: ownerSig
-		}));
+		flex.placeBet(
+			FlexComboMachine.PlaceBetParams({
+				picks: picks,
+				lazy_create_event_markets: lazys,
+				bet_size: betSize,
+				multipliers_config_id: 0,
+				bet_owner: bettor,
+				deadline: deadline,
+				token_type: 0,
+				automated_authority_signature: authSig,
+				owner_signature: ownerSig
+			})
+		);
 		betId = flex.getTotalBetsCount() - 1;
 	}
 
 	/// @dev Places a 5-pick bet
-	function _place5PickBet() internal returns (
-		uint256 betId,
-		FlexComboMachine.Pick[] memory picks,
-		FlexComboMachine.LazyCreateEventMarket[] memory lazys
-	) {
+	function _place5PickBet()
+		internal
+		returns (
+			uint256 betId,
+			FlexComboMachine.Pick[] memory picks,
+			FlexComboMachine.LazyCreateEventMarket[] memory lazys
+		)
+	{
 		uint96[] memory mids = new uint96[](5);
-		mids[0] = 10; mids[1] = 20; mids[2] = 30; mids[3] = 40; mids[4] = 50;
+		mids[0] = 10;
+		mids[1] = 20;
+		mids[2] = 30;
+		mids[3] = 40;
+		mids[4] = 50;
 		uint96[] memory oids = new uint96[](5);
-		oids[0] = 100; oids[1] = 200; oids[2] = 300; oids[3] = 400; oids[4] = 500;
+		oids[0] = 100;
+		oids[1] = 200;
+		oids[2] = 300;
+		oids[3] = 400;
+		oids[4] = 500;
 		(picks, lazys) = _picks(mids, oids);
 
 		uint128 betSize = 10e18;
 		uint256 deadline = block.timestamp + 1 hours;
 		uint256 nonce = flex.wallet_nonce(bettor);
 
-		bytes memory authSig = _signPlaceBet(picks, lazys, betSize, 0, bettor, deadline, nonce, 0, authorityPk);
-		bytes memory ownerSig = _signPlaceBet(picks, lazys, betSize, 0, bettor, deadline, nonce, 0, bettorPk);
+		bytes memory authSig = _signPlaceBet(
+			picks,
+			lazys,
+			betSize,
+			0,
+			bettor,
+			deadline,
+			nonce,
+			0,
+			authorityPk
+		);
+		bytes memory ownerSig = _signPlaceBet(
+			picks,
+			lazys,
+			betSize,
+			0,
+			bettor,
+			deadline,
+			nonce,
+			0,
+			bettorPk
+		);
 
-		flex.placeBet(FlexComboMachine.PlaceBetParams({
-			picks: picks, lazy_create_event_markets: lazys, bet_size: betSize,
-			multipliers_config_id: 0, bet_owner: bettor, deadline: deadline,
-			token_type: 0, automated_authority_signature: authSig, owner_signature: ownerSig
-		}));
+		flex.placeBet(
+			FlexComboMachine.PlaceBetParams({
+				picks: picks,
+				lazy_create_event_markets: lazys,
+				bet_size: betSize,
+				multipliers_config_id: 0,
+				bet_owner: bettor,
+				deadline: deadline,
+				token_type: 0,
+				automated_authority_signature: authSig,
+				owner_signature: ownerSig
+			})
+		);
 		betId = flex.getTotalBetsCount() - 1;
 	}
 
-	function _settleAllMarkets(FlexComboMachine.Pick[] memory picks, bytes12[] memory winningOutcomes) internal {
+	function _settleAllMarkets(
+		FlexComboMachine.Pick[] memory picks,
+		bytes12[] memory winningOutcomes
+	) internal {
 		vm.warp(block.timestamp + 2 hours);
 		uint256 deadline = block.timestamp + 1 hours;
 		for (uint256 i = 0; i < picks.length; i++) {
@@ -294,8 +462,12 @@ contract FlexComboMachineTest is Test {
 			if (outcome == bytes12(0)) {
 				registry.voidEventMarket(marketId, deadline, _signVoidEvent(marketId, deadline));
 			} else {
-				registry.settleEventMarket(marketId, outcome, deadline,
-					_signSettleEvent(marketId, outcome, deadline));
+				registry.settleEventMarket(
+					marketId,
+					outcome,
+					deadline,
+					_signSettleEvent(marketId, outcome, deadline)
+				);
 			}
 		}
 	}
@@ -329,7 +501,7 @@ contract FlexComboMachineTest is Test {
 	function test_placeBet_success() public {
 		uint256 bettorBalBefore = usdc.balanceOf(bettor);
 
-		(uint256 betId,,) = _placeDefaultBet();
+		(uint256 betId, , ) = _placeDefaultBet();
 
 		assertEq(betId, 0);
 		assertEq(flex.getTotalBetsCount(), 1);
@@ -346,23 +518,58 @@ contract FlexComboMachineTest is Test {
 
 		// second bet needs different market IDs
 		uint96[] memory mids = new uint96[](3);
-		mids[0] = 4; mids[1] = 5; mids[2] = 6;
+		mids[0] = 4;
+		mids[1] = 5;
+		mids[2] = 6;
 		uint96[] memory oids = new uint96[](3);
-		oids[0] = 400; oids[1] = 500; oids[2] = 600;
-		(FlexComboMachine.Pick[] memory picks, FlexComboMachine.LazyCreateEventMarket[] memory lazys) = _picks(mids, oids);
+		oids[0] = 400;
+		oids[1] = 500;
+		oids[2] = 600;
+		(
+			FlexComboMachine.Pick[] memory picks,
+			FlexComboMachine.LazyCreateEventMarket[] memory lazys
+		) = _picks(mids, oids);
 
 		uint128 betSize = 10e18;
 		uint256 deadline = block.timestamp + 1 hours;
 		uint256 nonce = 1;
 
-		bytes memory authSig = _signPlaceBet(picks, lazys, betSize, 0, bettor, deadline, nonce, 0, authorityPk);
-		bytes memory ownerSig = _signPlaceBet(picks, lazys, betSize, 0, bettor, deadline, nonce, 0, bettorPk);
+		bytes memory authSig = _signPlaceBet(
+			picks,
+			lazys,
+			betSize,
+			0,
+			bettor,
+			deadline,
+			nonce,
+			0,
+			authorityPk
+		);
+		bytes memory ownerSig = _signPlaceBet(
+			picks,
+			lazys,
+			betSize,
+			0,
+			bettor,
+			deadline,
+			nonce,
+			0,
+			bettorPk
+		);
 
-		flex.placeBet(FlexComboMachine.PlaceBetParams({
-			picks: picks, lazy_create_event_markets: lazys, bet_size: betSize,
-			multipliers_config_id: 0, bet_owner: bettor, deadline: deadline,
-			token_type: 0, automated_authority_signature: authSig, owner_signature: ownerSig
-		}));
+		flex.placeBet(
+			FlexComboMachine.PlaceBetParams({
+				picks: picks,
+				lazy_create_event_markets: lazys,
+				bet_size: betSize,
+				multipliers_config_id: 0,
+				bet_owner: bettor,
+				deadline: deadline,
+				token_type: 0,
+				automated_authority_signature: authSig,
+				owner_signature: ownerSig
+			})
+		);
 
 		assertEq(flex.wallet_nonce(bettor), 2);
 	}
@@ -371,46 +578,116 @@ contract FlexComboMachineTest is Test {
 	/// reverts with InvalidBetSize. The minimum bet limit is 1e15 (0.001 in 18 decimals).
 	function test_placeBet_revertsBelowMinBetSize() public {
 		uint96[] memory mids = new uint96[](3);
-		mids[0] = 1; mids[1] = 2; mids[2] = 3;
+		mids[0] = 1;
+		mids[1] = 2;
+		mids[2] = 3;
 		uint96[] memory oids = new uint96[](3);
-		oids[0] = 100; oids[1] = 200; oids[2] = 300;
-		(FlexComboMachine.Pick[] memory picks, FlexComboMachine.LazyCreateEventMarket[] memory lazys) = _picks(mids, oids);
+		oids[0] = 100;
+		oids[1] = 200;
+		oids[2] = 300;
+		(
+			FlexComboMachine.Pick[] memory picks,
+			FlexComboMachine.LazyCreateEventMarket[] memory lazys
+		) = _picks(mids, oids);
 
 		uint128 betSize = 1; // way below min
 		uint256 deadline = block.timestamp + 1 hours;
 
-		bytes memory authSig = _signPlaceBet(picks, lazys, betSize, 0, bettor, deadline, 0, 0, authorityPk);
-		bytes memory ownerSig = _signPlaceBet(picks, lazys, betSize, 0, bettor, deadline, 0, 0, bettorPk);
+		bytes memory authSig = _signPlaceBet(
+			picks,
+			lazys,
+			betSize,
+			0,
+			bettor,
+			deadline,
+			0,
+			0,
+			authorityPk
+		);
+		bytes memory ownerSig = _signPlaceBet(
+			picks,
+			lazys,
+			betSize,
+			0,
+			bettor,
+			deadline,
+			0,
+			0,
+			bettorPk
+		);
 
 		vm.expectRevert(FlexComboMachine.InvalidBetSize.selector);
-		flex.placeBet(FlexComboMachine.PlaceBetParams({
-			picks: picks, lazy_create_event_markets: lazys, bet_size: betSize,
-			multipliers_config_id: 0, bet_owner: bettor, deadline: deadline,
-			token_type: 0, automated_authority_signature: authSig, owner_signature: ownerSig
-		}));
+		flex.placeBet(
+			FlexComboMachine.PlaceBetParams({
+				picks: picks,
+				lazy_create_event_markets: lazys,
+				bet_size: betSize,
+				multipliers_config_id: 0,
+				bet_owner: bettor,
+				deadline: deadline,
+				token_type: 0,
+				automated_authority_signature: authSig,
+				owner_signature: ownerSig
+			})
+		);
 	}
 
 	/// @dev Verifies that placing a bet with 200,000 tokens (above the max of 100,000 tokens)
 	/// reverts with InvalidBetSize.
 	function test_placeBet_revertsAboveMaxBetSize() public {
 		uint96[] memory mids = new uint96[](3);
-		mids[0] = 1; mids[1] = 2; mids[2] = 3;
+		mids[0] = 1;
+		mids[1] = 2;
+		mids[2] = 3;
 		uint96[] memory oids = new uint96[](3);
-		oids[0] = 100; oids[1] = 200; oids[2] = 300;
-		(FlexComboMachine.Pick[] memory picks, FlexComboMachine.LazyCreateEventMarket[] memory lazys) = _picks(mids, oids);
+		oids[0] = 100;
+		oids[1] = 200;
+		oids[2] = 300;
+		(
+			FlexComboMachine.Pick[] memory picks,
+			FlexComboMachine.LazyCreateEventMarket[] memory lazys
+		) = _picks(mids, oids);
 
 		uint128 betSize = 200_000e18;
 		uint256 deadline = block.timestamp + 1 hours;
 
-		bytes memory authSig = _signPlaceBet(picks, lazys, betSize, 0, bettor, deadline, 0, 0, authorityPk);
-		bytes memory ownerSig = _signPlaceBet(picks, lazys, betSize, 0, bettor, deadline, 0, 0, bettorPk);
+		bytes memory authSig = _signPlaceBet(
+			picks,
+			lazys,
+			betSize,
+			0,
+			bettor,
+			deadline,
+			0,
+			0,
+			authorityPk
+		);
+		bytes memory ownerSig = _signPlaceBet(
+			picks,
+			lazys,
+			betSize,
+			0,
+			bettor,
+			deadline,
+			0,
+			0,
+			bettorPk
+		);
 
 		vm.expectRevert(FlexComboMachine.InvalidBetSize.selector);
-		flex.placeBet(FlexComboMachine.PlaceBetParams({
-			picks: picks, lazy_create_event_markets: lazys, bet_size: betSize,
-			multipliers_config_id: 0, bet_owner: bettor, deadline: deadline,
-			token_type: 0, automated_authority_signature: authSig, owner_signature: ownerSig
-		}));
+		flex.placeBet(
+			FlexComboMachine.PlaceBetParams({
+				picks: picks,
+				lazy_create_event_markets: lazys,
+				bet_size: betSize,
+				multipliers_config_id: 0,
+				bet_owner: bettor,
+				deadline: deadline,
+				token_type: 0,
+				automated_authority_signature: authSig,
+				owner_signature: ownerSig
+			})
+		);
 	}
 
 	/// @dev Verifies that a blacklisted wallet cannot place a bet.
@@ -421,46 +698,116 @@ contract FlexComboMachineTest is Test {
 		flex.addToBlacklist(bettor);
 
 		uint96[] memory mids = new uint96[](3);
-		mids[0] = 1; mids[1] = 2; mids[2] = 3;
+		mids[0] = 1;
+		mids[1] = 2;
+		mids[2] = 3;
 		uint96[] memory oids = new uint96[](3);
-		oids[0] = 100; oids[1] = 200; oids[2] = 300;
-		(FlexComboMachine.Pick[] memory picks, FlexComboMachine.LazyCreateEventMarket[] memory lazys) = _picks(mids, oids);
+		oids[0] = 100;
+		oids[1] = 200;
+		oids[2] = 300;
+		(
+			FlexComboMachine.Pick[] memory picks,
+			FlexComboMachine.LazyCreateEventMarket[] memory lazys
+		) = _picks(mids, oids);
 
 		uint128 betSize = 10e18;
 		uint256 deadline = block.timestamp + 1 hours;
 
-		bytes memory authSig = _signPlaceBet(picks, lazys, betSize, 0, bettor, deadline, 0, 0, authorityPk);
-		bytes memory ownerSig = _signPlaceBet(picks, lazys, betSize, 0, bettor, deadline, 0, 0, bettorPk);
+		bytes memory authSig = _signPlaceBet(
+			picks,
+			lazys,
+			betSize,
+			0,
+			bettor,
+			deadline,
+			0,
+			0,
+			authorityPk
+		);
+		bytes memory ownerSig = _signPlaceBet(
+			picks,
+			lazys,
+			betSize,
+			0,
+			bettor,
+			deadline,
+			0,
+			0,
+			bettorPk
+		);
 
 		vm.expectRevert(FlexComboMachine.Unauthorized.selector);
-		flex.placeBet(FlexComboMachine.PlaceBetParams({
-			picks: picks, lazy_create_event_markets: lazys, bet_size: betSize,
-			multipliers_config_id: 0, bet_owner: bettor, deadline: deadline,
-			token_type: 0, automated_authority_signature: authSig, owner_signature: ownerSig
-		}));
+		flex.placeBet(
+			FlexComboMachine.PlaceBetParams({
+				picks: picks,
+				lazy_create_event_markets: lazys,
+				bet_size: betSize,
+				multipliers_config_id: 0,
+				bet_owner: bettor,
+				deadline: deadline,
+				token_type: 0,
+				automated_authority_signature: authSig,
+				owner_signature: ownerSig
+			})
+		);
 	}
 
 	/// @dev Verifies that a bet with a deadline in the past (block.timestamp - 1) reverts with InvalidInput.
 	/// The deadline is a meta-transaction expiry to prevent stale signatures from being submitted.
 	function test_placeBet_revertsExpiredDeadline() public {
 		uint96[] memory mids = new uint96[](3);
-		mids[0] = 1; mids[1] = 2; mids[2] = 3;
+		mids[0] = 1;
+		mids[1] = 2;
+		mids[2] = 3;
 		uint96[] memory oids = new uint96[](3);
-		oids[0] = 100; oids[1] = 200; oids[2] = 300;
-		(FlexComboMachine.Pick[] memory picks, FlexComboMachine.LazyCreateEventMarket[] memory lazys) = _picks(mids, oids);
+		oids[0] = 100;
+		oids[1] = 200;
+		oids[2] = 300;
+		(
+			FlexComboMachine.Pick[] memory picks,
+			FlexComboMachine.LazyCreateEventMarket[] memory lazys
+		) = _picks(mids, oids);
 
 		uint128 betSize = 10e18;
 		uint256 deadline = block.timestamp - 1;
 
-		bytes memory authSig = _signPlaceBet(picks, lazys, betSize, 0, bettor, deadline, 0, 0, authorityPk);
-		bytes memory ownerSig = _signPlaceBet(picks, lazys, betSize, 0, bettor, deadline, 0, 0, bettorPk);
+		bytes memory authSig = _signPlaceBet(
+			picks,
+			lazys,
+			betSize,
+			0,
+			bettor,
+			deadline,
+			0,
+			0,
+			authorityPk
+		);
+		bytes memory ownerSig = _signPlaceBet(
+			picks,
+			lazys,
+			betSize,
+			0,
+			bettor,
+			deadline,
+			0,
+			0,
+			bettorPk
+		);
 
 		vm.expectRevert(FlexComboMachine.InvalidInput.selector);
-		flex.placeBet(FlexComboMachine.PlaceBetParams({
-			picks: picks, lazy_create_event_markets: lazys, bet_size: betSize,
-			multipliers_config_id: 0, bet_owner: bettor, deadline: deadline,
-			token_type: 0, automated_authority_signature: authSig, owner_signature: ownerSig
-		}));
+		flex.placeBet(
+			FlexComboMachine.PlaceBetParams({
+				picks: picks,
+				lazy_create_event_markets: lazys,
+				bet_size: betSize,
+				multipliers_config_id: 0,
+				bet_owner: bettor,
+				deadline: deadline,
+				token_type: 0,
+				automated_authority_signature: authSig,
+				owner_signature: ownerSig
+			})
+		);
 	}
 
 	/// @dev Verifies that placeBet reverts when the contract is paused by the owner.
@@ -470,23 +817,58 @@ contract FlexComboMachineTest is Test {
 		flex.pause();
 
 		uint96[] memory mids = new uint96[](3);
-		mids[0] = 1; mids[1] = 2; mids[2] = 3;
+		mids[0] = 1;
+		mids[1] = 2;
+		mids[2] = 3;
 		uint96[] memory oids = new uint96[](3);
-		oids[0] = 100; oids[1] = 200; oids[2] = 300;
-		(FlexComboMachine.Pick[] memory picks, FlexComboMachine.LazyCreateEventMarket[] memory lazys) = _picks(mids, oids);
+		oids[0] = 100;
+		oids[1] = 200;
+		oids[2] = 300;
+		(
+			FlexComboMachine.Pick[] memory picks,
+			FlexComboMachine.LazyCreateEventMarket[] memory lazys
+		) = _picks(mids, oids);
 
 		uint128 betSize = 10e18;
 		uint256 deadline = block.timestamp + 1 hours;
 
-		bytes memory authSig = _signPlaceBet(picks, lazys, betSize, 0, bettor, deadline, 0, 0, authorityPk);
-		bytes memory ownerSig = _signPlaceBet(picks, lazys, betSize, 0, bettor, deadline, 0, 0, bettorPk);
+		bytes memory authSig = _signPlaceBet(
+			picks,
+			lazys,
+			betSize,
+			0,
+			bettor,
+			deadline,
+			0,
+			0,
+			authorityPk
+		);
+		bytes memory ownerSig = _signPlaceBet(
+			picks,
+			lazys,
+			betSize,
+			0,
+			bettor,
+			deadline,
+			0,
+			0,
+			bettorPk
+		);
 
 		vm.expectRevert();
-		flex.placeBet(FlexComboMachine.PlaceBetParams({
-			picks: picks, lazy_create_event_markets: lazys, bet_size: betSize,
-			multipliers_config_id: 0, bet_owner: bettor, deadline: deadline,
-			token_type: 0, automated_authority_signature: authSig, owner_signature: ownerSig
-		}));
+		flex.placeBet(
+			FlexComboMachine.PlaceBetParams({
+				picks: picks,
+				lazy_create_event_markets: lazys,
+				bet_size: betSize,
+				multipliers_config_id: 0,
+				bet_owner: bettor,
+				deadline: deadline,
+				token_type: 0,
+				automated_authority_signature: authSig,
+				owner_signature: ownerSig
+			})
+		);
 	}
 
 	/// @dev Verifies that placing a bet with only 2 picks reverts with InvalidPicksCount,
@@ -494,23 +876,56 @@ contract FlexComboMachineTest is Test {
 	function test_placeBet_revertsTooFewPicks() public {
 		// 2 picks, min is 3
 		uint96[] memory mids = new uint96[](2);
-		mids[0] = 1; mids[1] = 2;
+		mids[0] = 1;
+		mids[1] = 2;
 		uint96[] memory oids = new uint96[](2);
-		oids[0] = 100; oids[1] = 200;
-		(FlexComboMachine.Pick[] memory picks, FlexComboMachine.LazyCreateEventMarket[] memory lazys) = _picks(mids, oids);
+		oids[0] = 100;
+		oids[1] = 200;
+		(
+			FlexComboMachine.Pick[] memory picks,
+			FlexComboMachine.LazyCreateEventMarket[] memory lazys
+		) = _picks(mids, oids);
 
 		uint128 betSize = 10e18;
 		uint256 deadline = block.timestamp + 1 hours;
 
-		bytes memory authSig = _signPlaceBet(picks, lazys, betSize, 0, bettor, deadline, 0, 0, authorityPk);
-		bytes memory ownerSig = _signPlaceBet(picks, lazys, betSize, 0, bettor, deadline, 0, 0, bettorPk);
+		bytes memory authSig = _signPlaceBet(
+			picks,
+			lazys,
+			betSize,
+			0,
+			bettor,
+			deadline,
+			0,
+			0,
+			authorityPk
+		);
+		bytes memory ownerSig = _signPlaceBet(
+			picks,
+			lazys,
+			betSize,
+			0,
+			bettor,
+			deadline,
+			0,
+			0,
+			bettorPk
+		);
 
 		vm.expectRevert(FlexComboMachine.InvalidPicksCount.selector);
-		flex.placeBet(FlexComboMachine.PlaceBetParams({
-			picks: picks, lazy_create_event_markets: lazys, bet_size: betSize,
-			multipliers_config_id: 0, bet_owner: bettor, deadline: deadline,
-			token_type: 0, automated_authority_signature: authSig, owner_signature: ownerSig
-		}));
+		flex.placeBet(
+			FlexComboMachine.PlaceBetParams({
+				picks: picks,
+				lazy_create_event_markets: lazys,
+				bet_size: betSize,
+				multipliers_config_id: 0,
+				bet_owner: bettor,
+				deadline: deadline,
+				token_type: 0,
+				automated_authority_signature: authSig,
+				owner_signature: ownerSig
+			})
+		);
 	}
 
 	// ─── Settle Bet: All Wins ───
@@ -519,7 +934,7 @@ contract FlexComboMachineTest is Test {
 	/// picks_count_index = 3 - 3 = 0, lost_count = 0 → mults[0][0] = 300 (x3.00)
 	/// Payout = 10 USDC * 3.00 = 30 USDC. Bet status changes to SETTLED (5).
 	function test_settleBet_allWins() public {
-		(uint256 betId, FlexComboMachine.Pick[] memory picks,) = _placeDefaultBet();
+		(uint256 betId, FlexComboMachine.Pick[] memory picks, ) = _placeDefaultBet();
 
 		// All 3 markets won
 		bytes12[] memory outcomes = new bytes12[](3);
@@ -535,7 +950,7 @@ contract FlexComboMachineTest is Test {
 		// 3 picks, 0 lost → multiplier = 300 (x3.00) → payout = 10e18 * 300 / 100 = 30e18 = 30e6 USDC
 		assertEq(usdc.balanceOf(bettor), bettorBalBefore + 30e6);
 
-		(, uint8 status,,,,,) = flex.bets(betId);
+		(, uint8 status, , , , , ) = flex.bets(betId);
 		assertEq(status, 5); // STATUS_SETTLED
 	}
 
@@ -546,7 +961,7 @@ contract FlexComboMachineTest is Test {
 	/// picks_count_index = 0, lost_count = 1 → mults[0][1] = 100 (x1.00)
 	/// Payout = 10 USDC * 1.00 = 10 USDC (bettor gets their money back, no profit).
 	function test_settleBet_partialWin_1loss() public {
-		(uint256 betId, FlexComboMachine.Pick[] memory picks,) = _placeDefaultBet();
+		(uint256 betId, FlexComboMachine.Pick[] memory picks, ) = _placeDefaultBet();
 
 		// 2 wins, 1 loss
 		bytes12[] memory outcomes = new bytes12[](3);
@@ -569,7 +984,7 @@ contract FlexComboMachineTest is Test {
 	/// for 3 picks only has 3 entries (indices 0,1,2), so lost_count >= row.length.
 	/// When lost_count >= row length, payout is 0 (total loss). No USDC returned.
 	function test_settleBet_allLosses() public {
-		(uint256 betId, FlexComboMachine.Pick[] memory picks,) = _placeDefaultBet();
+		(uint256 betId, FlexComboMachine.Pick[] memory picks, ) = _placeDefaultBet();
 
 		// All 3 markets lost (different outcomes)
 		bytes12[] memory outcomes = new bytes12[](3);
@@ -592,7 +1007,7 @@ contract FlexComboMachineTest is Test {
 	/// mults[0][2] = 0 — the config explicitly sets this to 0, meaning 2 losses out of 3
 	/// results in no payout even though the multiplier entry exists.
 	function test_settleBet_2lossesOf3() public {
-		(uint256 betId, FlexComboMachine.Pick[] memory picks,) = _placeDefaultBet();
+		(uint256 betId, FlexComboMachine.Pick[] memory picks, ) = _placeDefaultBet();
 
 		// 1 win, 2 losses
 		bytes12[] memory outcomes = new bytes12[](3);
@@ -616,7 +1031,7 @@ contract FlexComboMachineTest is Test {
 	/// → mults[2][1] = 200 (x2.00). Payout = 10 USDC * 2.00 = 20 USDC.
 	/// In power play, 1 loss would mean total loss. In flex play, the bettor still profits.
 	function test_settleBet_5picks_1loss() public {
-		(uint256 betId, FlexComboMachine.Pick[] memory picks,) = _place5PickBet();
+		(uint256 betId, FlexComboMachine.Pick[] memory picks, ) = _place5PickBet();
 
 		// 4 wins, 1 loss
 		bytes12[] memory outcomes = new bytes12[](5);
@@ -640,7 +1055,7 @@ contract FlexComboMachineTest is Test {
 	/// picks_count_index = 2, lost_count = 2 → mults[2][2] = 40 (x0.40)
 	/// Payout = 10 USDC * 0.40 = 4 USDC. Bettor loses 60% of their stake but still gets something back.
 	function test_settleBet_5picks_2losses() public {
-		(uint256 betId, FlexComboMachine.Pick[] memory picks,) = _place5PickBet();
+		(uint256 betId, FlexComboMachine.Pick[] memory picks, ) = _place5PickBet();
 
 		// 3 wins, 2 losses
 		bytes12[] memory outcomes = new bytes12[](5);
@@ -666,13 +1081,13 @@ contract FlexComboMachineTest is Test {
 	/// remaining_picks = 3 - 2 = 1. Since 1 < min_picks_count (3), the bet is automatically
 	/// refunded — full stake returned to bettor. Status changes to REFUNDED (2).
 	function test_settleBet_voidedMarket_refundsIfBelowMinPicks() public {
-		(uint256 betId, FlexComboMachine.Pick[] memory picks,) = _placeDefaultBet();
+		(uint256 betId, FlexComboMachine.Pick[] memory picks, ) = _placeDefaultBet();
 
 		// 1 won, 2 voided → remaining=1 < min_picks(3) → refund
 		bytes12[] memory outcomes = new bytes12[](3);
 		outcomes[0] = bytes12(uint96(100)); // win
-		outcomes[1] = bytes12(0);           // voided
-		outcomes[2] = bytes12(0);           // voided
+		outcomes[1] = bytes12(0); // voided
+		outcomes[2] = bytes12(0); // voided
 		_settleAllMarkets(picks, outcomes);
 
 		uint256 bettorBalBefore = usdc.balanceOf(bettor);
@@ -681,7 +1096,7 @@ contract FlexComboMachineTest is Test {
 
 		// Refund: 10 USDC back
 		assertEq(usdc.balanceOf(bettor), bettorBalBefore + 10e6);
-		(, uint8 status,,,,,) = flex.bets(betId);
+		(, uint8 status, , , , , ) = flex.bets(betId);
 		assertEq(status, 2); // STATUS_REFUNDED
 	}
 
@@ -692,13 +1107,13 @@ contract FlexComboMachineTest is Test {
 	/// Payout = 10 USDC * 1.50 = 15 USDC.
 	function test_settleBet_voidedMarket_recalculatesMultiplier() public {
 		// 5 picks, 1 voided → remaining=4 picks, use row index for 4 picks
-		(uint256 betId, FlexComboMachine.Pick[] memory picks,) = _place5PickBet();
+		(uint256 betId, FlexComboMachine.Pick[] memory picks, ) = _place5PickBet();
 
 		// 3 wins, 1 loss, 1 voided → remaining=4, lost_count=1
 		bytes12[] memory outcomes = new bytes12[](5);
 		outcomes[0] = bytes12(uint96(100)); // win
 		outcomes[1] = bytes12(uint96(200)); // win
-		outcomes[2] = bytes12(0);           // voided
+		outcomes[2] = bytes12(0); // voided
 		outcomes[3] = bytes12(uint96(998)); // loss
 		outcomes[4] = bytes12(uint96(500)); // win
 		_settleAllMarkets(picks, outcomes);
@@ -715,7 +1130,7 @@ contract FlexComboMachineTest is Test {
 	/// @dev 3-pick bet where all 3 events are voided. remaining_picks = 0 < min_picks_count (3),
 	/// so the bet is refunded. This is an edge case where no events resolved at all.
 	function test_settleBet_allVoided_refunds() public {
-		(uint256 betId, FlexComboMachine.Pick[] memory picks,) = _placeDefaultBet();
+		(uint256 betId, FlexComboMachine.Pick[] memory picks, ) = _placeDefaultBet();
 
 		// All 3 voided → remaining=0 < min_picks(3) → refund
 		bytes12[] memory outcomes = new bytes12[](3);
@@ -729,35 +1144,61 @@ contract FlexComboMachineTest is Test {
 		flex.settleBet(betId, picks, deadline, _signSettleBet(betId, picks, deadline));
 
 		assertEq(usdc.balanceOf(bettor), bettorBalBefore + 10e6);
-		(, uint8 status,,,,,) = flex.bets(betId);
+		(, uint8 status, , , , , ) = flex.bets(betId);
 		assertEq(status, 2); // STATUS_REFUNDED
 	}
 
 	// ─── Settle Bet: Credit Token ───
 
-	function _placeCreditBet() internal returns (uint256 betId, FlexComboMachine.Pick[] memory picks) {
+	function _placeCreditBet()
+		internal
+		returns (uint256 betId, FlexComboMachine.Pick[] memory picks)
+	{
 		creditToken.mint(bettor, 100e18);
 		vm.prank(bettor);
-		creditToken.approve(address(flex), type(uint256).max);
+		creditToken.approve(address(treasury), type(uint256).max);
 		creditToken.mint(address(treasury), 100e18);
 
 		uint96[] memory mids = new uint96[](3);
-		mids[0] = 11; mids[1] = 12; mids[2] = 13;
+		mids[0] = 11;
+		mids[1] = 12;
+		mids[2] = 13;
 		uint96[] memory oids = new uint96[](3);
-		oids[0] = 100; oids[1] = 200; oids[2] = 300;
-		(FlexComboMachine.Pick[] memory p, FlexComboMachine.LazyCreateEventMarket[] memory lazys) = _picks(mids, oids);
+		oids[0] = 100;
+		oids[1] = 200;
+		oids[2] = 300;
+		(
+			FlexComboMachine.Pick[] memory p,
+			FlexComboMachine.LazyCreateEventMarket[] memory lazys
+		) = _picks(mids, oids);
 
 		uint128 betSize = 10e18;
 		uint256 deadline = block.timestamp + 1 hours;
 		uint256 nonce = flex.wallet_nonce(bettor);
 
-		flex.placeBet(FlexComboMachine.PlaceBetParams({
-			picks: p, lazy_create_event_markets: lazys, bet_size: betSize,
-			multipliers_config_id: 0, bet_owner: bettor, deadline: deadline,
-			token_type: 1,
-			automated_authority_signature: _signPlaceBet(p, lazys, betSize, 0, bettor, deadline, nonce, 1, authorityPk),
-			owner_signature: _signPlaceBet(p, lazys, betSize, 0, bettor, deadline, nonce, 1, bettorPk)
-		}));
+		flex.placeBet(
+			FlexComboMachine.PlaceBetParams({
+				picks: p,
+				lazy_create_event_markets: lazys,
+				bet_size: betSize,
+				multipliers_config_id: 0,
+				bet_owner: bettor,
+				deadline: deadline,
+				token_type: 1,
+				automated_authority_signature: _signPlaceBet(
+					p,
+					lazys,
+					betSize,
+					0,
+					bettor,
+					deadline,
+					nonce,
+					1,
+					authorityPk
+				),
+				owner_signature: _signPlaceBet(p, lazys, betSize, 0, bettor, deadline, nonce, 1, bettorPk)
+			})
+		);
 		return (flex.getTotalBetsCount() - 1, p);
 	}
 
@@ -788,13 +1229,17 @@ contract FlexComboMachineTest is Test {
 	/// Only market #1 is settled; market #2 and #3 are still pending. The contract loops through
 	/// all picks and breaks early when it finds an unsettled market, then reverts with EventMarketsNotSettled.
 	function test_settleBet_revertsIfNotAllSettled() public {
-		(uint256 betId, FlexComboMachine.Pick[] memory picks,) = _placeDefaultBet();
+		(uint256 betId, FlexComboMachine.Pick[] memory picks, ) = _placeDefaultBet();
 
 		// Only settle one market
 		vm.warp(block.timestamp + 2 hours);
 		uint256 deadline = block.timestamp + 1 hours;
-		registry.settleEventMarket(bytes12(uint96(1)), bytes12(uint96(100)), deadline,
-			_signSettleEvent(bytes12(uint96(1)), bytes12(uint96(100)), deadline));
+		registry.settleEventMarket(
+			bytes12(uint96(1)),
+			bytes12(uint96(100)),
+			deadline,
+			_signSettleEvent(bytes12(uint96(1)), bytes12(uint96(100)), deadline)
+		);
 
 		vm.expectRevert(FlexComboMachine.EventMarketsNotSettled.selector);
 		flex.settleBet(betId, picks, deadline, _signSettleBet(betId, picks, deadline));
@@ -804,7 +1249,7 @@ contract FlexComboMachineTest is Test {
 	/// changes status to SETTLED (5), the second call reverts with BetNotActive because
 	/// the contract requires status == ACTIVE (0) to proceed with settlement.
 	function test_settleBet_revertsIfAlreadySettled() public {
-		(uint256 betId, FlexComboMachine.Pick[] memory picks,) = _placeDefaultBet();
+		(uint256 betId, FlexComboMachine.Pick[] memory picks, ) = _placeDefaultBet();
 
 		bytes12[] memory outcomes = new bytes12[](3);
 		outcomes[0] = bytes12(uint96(100));
@@ -823,7 +1268,7 @@ contract FlexComboMachineTest is Test {
 	/// This prevents old/stale automated_authority signatures from being replayed after their
 	/// intended validity window. Reverts with SignatureExpired.
 	function test_settleBet_revertsExpiredSignature() public {
-		(uint256 betId, FlexComboMachine.Pick[] memory picks,) = _placeDefaultBet();
+		(uint256 betId, FlexComboMachine.Pick[] memory picks, ) = _placeDefaultBet();
 
 		vm.warp(block.timestamp + 2 hours);
 		uint256 deadline = block.timestamp - 1;
@@ -837,12 +1282,12 @@ contract FlexComboMachineTest is Test {
 	/// @dev Compliance officer freezes an active bet. Frozen bets cannot be settled until
 	/// reactivated. Used for suspicious activity investigation. Status: ACTIVE(0) → FROZEN(1).
 	function test_enforceBetStatus_freeze() public {
-		(uint256 betId,,) = _placeDefaultBet();
+		(uint256 betId, , ) = _placeDefaultBet();
 
 		vm.prank(complianceOfficer);
 		flex.enforceBetStatus(betId, 1); // FROZEN
 
-		(, uint8 status,,,,,) = flex.bets(betId);
+		(, uint8 status, , , , , ) = flex.bets(betId);
 		assertEq(status, 1);
 	}
 
@@ -850,7 +1295,7 @@ contract FlexComboMachineTest is Test {
 	/// Only frozen bets can be activated — this is the only valid reverse transition.
 	/// Status: ACTIVE(0) → FROZEN(1) → ACTIVE(0).
 	function test_enforceBetStatus_activateFromFrozen() public {
-		(uint256 betId,,) = _placeDefaultBet();
+		(uint256 betId, , ) = _placeDefaultBet();
 
 		vm.prank(complianceOfficer);
 		flex.enforceBetStatus(betId, 1); // FROZEN
@@ -858,14 +1303,14 @@ contract FlexComboMachineTest is Test {
 		vm.prank(complianceOfficer);
 		flex.enforceBetStatus(betId, 0); // ACTIVE
 
-		(, uint8 status,,,,,) = flex.bets(betId);
+		(, uint8 status, , , , , ) = flex.bets(betId);
 		assertEq(status, 0);
 	}
 
 	/// @dev Compliance officer refunds an active bet — full stake (10 USDC) returned to bettor.
 	/// The treasury drains the funds back. Status: ACTIVE(0) → REFUNDED(2). This is a terminal state.
 	function test_enforceBetStatus_refund() public {
-		(uint256 betId,,) = _placeDefaultBet();
+		(uint256 betId, , ) = _placeDefaultBet();
 
 		uint256 bettorBalBefore = usdc.balanceOf(bettor);
 
@@ -873,29 +1318,25 @@ contract FlexComboMachineTest is Test {
 		flex.enforceBetStatus(betId, 2); // REFUNDED
 
 		assertEq(usdc.balanceOf(bettor), bettorBalBefore + 10e6);
-		(, uint8 status,,,,,) = flex.bets(betId);
+		(, uint8 status, , , , , ) = flex.bets(betId);
 		assertEq(status, 2);
 	}
 
-	/// @dev Compliance officer cancels an active bet — same as refund (funds returned),
-	/// but with different semantic meaning (administrative cancellation vs user-requested refund).
-	/// Status: ACTIVE(0) → CANCELED(3). Terminal state, funds drained back to bettor.
-	function test_enforceBetStatus_cancel() public {
-		(uint256 betId,,) = _placeDefaultBet();
-
-		uint256 bettorBalBefore = usdc.balanceOf(bettor);
+	/// @dev Compliance officer cannot cancel bets — cancel is user-only via cancelBet().
+	/// Status 3 (CANCELED) is no longer accepted by enforceBetStatus.
+	function test_enforceBetStatus_cancel_revertsInvalidStatus() public {
+		(uint256 betId, , ) = _placeDefaultBet();
 
 		vm.prank(complianceOfficer);
-		flex.enforceBetStatus(betId, 3); // CANCELED
-
-		assertEq(usdc.balanceOf(bettor), bettorBalBefore + 10e6);
+		vm.expectRevert(FlexComboMachine.InvalidStatus.selector);
+		flex.enforceBetStatus(betId, 3); // CANCELED no longer allowed
 	}
 
 	/// @dev Compliance officer seizes a bet — funds stay in treasury (no withdrawal).
 	/// Used for confirmed fraud, insider betting, or rule violations.
 	/// Status: ACTIVE(0) → SEIZED(4). Terminal state, bettor gets nothing.
 	function test_enforceBetStatus_seize() public {
-		(uint256 betId,,) = _placeDefaultBet();
+		(uint256 betId, , ) = _placeDefaultBet();
 
 		uint256 treasuryBal = usdc.balanceOf(address(treasury));
 
@@ -903,14 +1344,14 @@ contract FlexComboMachineTest is Test {
 		flex.enforceBetStatus(betId, 4); // SEIZED
 
 		assertEq(usdc.balanceOf(address(treasury)), treasuryBal);
-		(, uint8 status,,,,,) = flex.bets(betId);
+		(, uint8 status, , , , , ) = flex.bets(betId);
 		assertEq(status, 4);
 	}
 
 	/// @dev Verifies that only compliance officers can call enforceBetStatus.
 	/// A random stranger address reverts with Unauthorized.
 	function test_enforceBetStatus_revertsUnauthorized() public {
-		(uint256 betId,,) = _placeDefaultBet();
+		(uint256 betId, , ) = _placeDefaultBet();
 
 		vm.prank(stranger);
 		vm.expectRevert(FlexComboMachine.Unauthorized.selector);
@@ -920,7 +1361,7 @@ contract FlexComboMachineTest is Test {
 	/// @dev Verifies that activating an already-active bet reverts with InvalidStatus.
 	/// ACTIVE → ACTIVE is not a valid transition; only FROZEN → ACTIVE is allowed.
 	function test_enforceBetStatus_revertsInvalidTransition() public {
-		(uint256 betId,,) = _placeDefaultBet();
+		(uint256 betId, , ) = _placeDefaultBet();
 
 		vm.prank(complianceOfficer);
 		vm.expectRevert(FlexComboMachine.InvalidStatus.selector);
@@ -946,12 +1387,12 @@ contract FlexComboMachineTest is Test {
 		vm.prank(contractOwner);
 		flex.addMultiplierConfig(mults2);
 
-		(uint256 betId,,) = _placeDefaultBet();
+		(uint256 betId, , ) = _placeDefaultBet();
 
 		vm.prank(complianceOfficer);
 		flex.enforceBetMultiplierConfigId(betId, 1);
 
-		(,,, uint24 configId,,,) = flex.bets(betId);
+		(, , , uint24 configId, , , ) = flex.bets(betId);
 		assertEq(configId, 1);
 	}
 
@@ -1023,7 +1464,8 @@ contract FlexComboMachineTest is Test {
 		mults[2] = new uint256[](5);
 		mults[3] = new uint256[](6);
 		mults[0][0] = MAX_MULTIPLIER + 1; // exceeds max
-		mults[0][1] = 100; mults[0][2] = 0;
+		mults[0][1] = 100;
+		mults[0][2] = 0;
 		for (uint i = 0; i < 4; i++) mults[1][i] = 100;
 		for (uint i = 0; i < 5; i++) mults[2][i] = 100;
 		for (uint i = 0; i < 6; i++) mults[3][i] = 100;
@@ -1050,7 +1492,7 @@ contract FlexComboMachineTest is Test {
 		vm.prank(contractOwner);
 		flex.updateMultiplierConfig(0, mults, false);
 
-		(bool isActive) = flex.multipliers(0);
+		bool isActive = flex.multipliers(0);
 		assertFalse(isActive);
 	}
 
@@ -1063,7 +1505,7 @@ contract FlexComboMachineTest is Test {
 		address newAuth = makeAddr("newAuth");
 
 		vm.prank(contractOwner);
-		flex.updateConfiguration(newAuth, address(0), 5e18, 50_000e18);
+		flex.updateConfiguration(newAuth, address(0), 5e18, 50_000e18, type(uint16).max);
 
 		assertEq(flex.automated_authority_address(), newAuth);
 		(uint128 minBet, uint128 maxBet) = flex.bet_limits();
@@ -1075,7 +1517,7 @@ contract FlexComboMachineTest is Test {
 	/// This allows updating only specific parameters without affecting others.
 	function test_updateConfiguration_skipsZeros() public {
 		vm.prank(contractOwner);
-		flex.updateConfiguration(address(0), address(0), 0, 0);
+		flex.updateConfiguration(address(0), address(0), 0, 0, type(uint16).max);
 
 		assertEq(flex.automated_authority_address(), authority);
 		(uint128 minBet, uint128 maxBet) = flex.bet_limits();
@@ -1087,8 +1529,10 @@ contract FlexComboMachineTest is Test {
 	/// Reverts with OwnableUnauthorizedAccount(stranger).
 	function test_updateConfiguration_revertsNonOwner() public {
 		vm.prank(stranger);
-		vm.expectRevert(abi.encodeWithSelector(FlexComboMachine.OwnableUnauthorizedAccount.selector, stranger));
-		flex.updateConfiguration(makeAddr("x"), address(0), 0, 0);
+		vm.expectRevert(
+			abi.encodeWithSelector(FlexComboMachine.OwnableUnauthorizedAccount.selector, stranger)
+		);
+		flex.updateConfiguration(makeAddr("x"), address(0), 0, 0, type(uint16).max);
 	}
 
 	// ─── Compliance Officers ───
@@ -1155,6 +1599,206 @@ contract FlexComboMachineTest is Test {
 		vm.prank(contractOwner);
 		flex.renounceOwnership();
 		assertEq(flex.owner(), address(0));
+	}
+
+	// ─── Cancel Bet ───
+
+	function _createCancelParams(
+		uint256 betId,
+		FlexComboMachine.Pick[] memory picks,
+		address owner_,
+		uint256 ownerPk,
+		uint256 deadline
+	) internal view returns (FlexComboMachine.CancelBetParams memory) {
+		uint256 nonce = flex.wallet_nonce(owner_);
+		bytes memory ownerSig = _signCancelBet(owner_, betId, picks, deadline, nonce, ownerPk);
+		bytes memory authSig = _signCancelBet(owner_, betId, picks, deadline, nonce, authorityPk);
+		return FlexComboMachine.CancelBetParams({
+			bet_id: betId,
+			picks: picks,
+			bet_owner: owner_,
+			deadline: deadline,
+			owner_signature: ownerSig,
+			automated_authority_signature: authSig
+		});
+	}
+
+	function _cancelBetWithSigs(
+		uint256 betId,
+		FlexComboMachine.Pick[] memory picks,
+		address owner_,
+		uint256 ownerPk
+	) internal {
+		FlexComboMachine.CancelBetParams memory params = _createCancelParams(
+			betId, picks, owner_, ownerPk, block.timestamp + 1 hours
+		);
+		flex.cancelBet(params);
+	}
+
+	/// @dev User cancels active bet before settlement window, receives 90% refund (10% fee)
+	function test_cancelBet_success() public {
+		// Set 10% cancel fee (1000 bps)
+		vm.prank(contractOwner);
+		flex.updateConfiguration(address(0), address(0), 0, 0, 1000);
+
+		(uint256 betId, FlexComboMachine.Pick[] memory picks, ) = _placeDefaultBet();
+
+		uint256 bettorBalBefore = usdc.balanceOf(bettor);
+
+		_cancelBetWithSigs(betId, picks, bettor, bettorPk);
+
+		// 10 USDC bet, 10% fee = 1 USDC fee, 9 USDC refund (9e6 in USDC decimals)
+		assertEq(usdc.balanceOf(bettor), bettorBalBefore + 9e6);
+
+		(, uint8 status, , , , , ) = flex.bets(betId);
+		assertEq(status, 3); // STATUS_CANCELED
+	}
+
+	/// @dev Cancel with 0% fee returns full amount
+	function test_cancelBet_zeroFee() public {
+		(uint256 betId, FlexComboMachine.Pick[] memory picks, ) = _placeDefaultBet();
+
+		uint256 bettorBalBefore = usdc.balanceOf(bettor);
+
+		_cancelBetWithSigs(betId, picks, bettor, bettorPk);
+
+		assertEq(usdc.balanceOf(bettor), bettorBalBefore + 10e6);
+	}
+
+	/// @dev Cancel reverts after settlement window opens
+	function test_cancelBet_revertsCancelWindowClosed() public {
+		(uint256 betId, FlexComboMachine.Pick[] memory picks, ) = _placeDefaultBet();
+
+		uint256 deadline = block.timestamp + 3 hours;
+		FlexComboMachine.CancelBetParams memory params = _createCancelParams(betId, picks, bettor, bettorPk, deadline);
+
+		// Warp past min_settlement_ts but before deadline
+		vm.warp(block.timestamp + 2 hours);
+
+		vm.expectRevert(FlexComboMachine.CancelWindowClosed.selector);
+		flex.cancelBet(params);
+	}
+
+	/// @dev Cancel reverts with invalid owner signature
+	function test_cancelBet_revertsInvalidOwnerSignature() public {
+		(uint256 betId, FlexComboMachine.Pick[] memory picks, ) = _placeDefaultBet();
+
+		uint256 deadline = block.timestamp + 1 hours;
+		uint256 nonce = flex.wallet_nonce(bettor);
+		uint256 strangerPk = 0x5678;
+		bytes memory ownerSig = _signCancelBet(bettor, betId, picks, deadline, nonce, strangerPk);
+		bytes memory authSig = _signCancelBet(bettor, betId, picks, deadline, nonce, authorityPk);
+
+		vm.expectRevert(FlexComboMachine.InvalidSignature.selector);
+		flex.cancelBet(FlexComboMachine.CancelBetParams({
+			bet_id: betId, picks: picks, bet_owner: bettor, deadline: deadline,
+			owner_signature: ownerSig, automated_authority_signature: authSig
+		}));
+	}
+
+	/// @dev Cancel reverts with invalid authority signature
+	function test_cancelBet_revertsInvalidAuthoritySignature() public {
+		(uint256 betId, FlexComboMachine.Pick[] memory picks, ) = _placeDefaultBet();
+
+		uint256 deadline = block.timestamp + 1 hours;
+		uint256 nonce = flex.wallet_nonce(bettor);
+		bytes memory ownerSig = _signCancelBet(bettor, betId, picks, deadline, nonce, bettorPk);
+		uint256 fakePk = 0x9999;
+		bytes memory authSig = _signCancelBet(bettor, betId, picks, deadline, nonce, fakePk);
+
+		vm.expectRevert(FlexComboMachine.InvalidSignature.selector);
+		flex.cancelBet(FlexComboMachine.CancelBetParams({
+			bet_id: betId, picks: picks, bet_owner: bettor, deadline: deadline,
+			owner_signature: ownerSig, automated_authority_signature: authSig
+		}));
+	}
+
+	/// @dev Cancel reverts when bet_owner doesn't match actual bet owner
+	function test_cancelBet_revertsNonOwner() public {
+		(uint256 betId, FlexComboMachine.Pick[] memory picks, ) = _placeDefaultBet();
+
+		uint256 strangerPk = 0x5678;
+		address strangerAddr = vm.addr(strangerPk);
+
+		FlexComboMachine.CancelBetParams memory params = _createCancelParams(betId, picks, strangerAddr, strangerPk, block.timestamp + 1 hours);
+
+		vm.expectRevert(FlexComboMachine.Unauthorized.selector);
+		flex.cancelBet(params);
+	}
+
+	/// @dev Cannot cancel non-active bet
+	function test_cancelBet_revertsNotActive() public {
+		(uint256 betId, FlexComboMachine.Pick[] memory picks, ) = _placeDefaultBet();
+
+		// Freeze the bet first
+		vm.prank(complianceOfficer);
+		flex.enforceBetStatus(betId, 1); // FROZEN
+
+		FlexComboMachine.CancelBetParams memory params = _createCancelParams(betId, picks, bettor, bettorPk, block.timestamp + 1 hours);
+
+		vm.expectRevert(FlexComboMachine.BetNotActive.selector);
+		flex.cancelBet(params);
+	}
+
+	/// @dev Cancel reverts with wrong picks
+	function test_cancelBet_revertsInvalidPicks() public {
+		(uint256 betId, , ) = _placeDefaultBet();
+
+		FlexComboMachine.Pick[] memory wrongPicks = new FlexComboMachine.Pick[](3);
+		wrongPicks[0] = FlexComboMachine.Pick({
+			event_market_id: bytes12(uint96(1)),
+			outcome_id: bytes12(uint96(999))
+		});
+		wrongPicks[1] = FlexComboMachine.Pick({
+			event_market_id: bytes12(uint96(2)),
+			outcome_id: bytes12(uint96(999))
+		});
+		wrongPicks[2] = FlexComboMachine.Pick({
+			event_market_id: bytes12(uint96(3)),
+			outcome_id: bytes12(uint96(999))
+		});
+
+		FlexComboMachine.CancelBetParams memory params = _createCancelParams(betId, wrongPicks, bettor, bettorPk, block.timestamp + 1 hours);
+
+		vm.expectRevert(FlexComboMachine.InvalidInput.selector);
+		flex.cancelBet(params);
+	}
+
+	/// @dev Cancel reverts when deadline has passed
+	function test_cancelBet_revertsExpiredDeadline() public {
+		(uint256 betId, FlexComboMachine.Pick[] memory picks, ) = _placeDefaultBet();
+
+		uint256 deadline = block.timestamp + 1 hours;
+		FlexComboMachine.CancelBetParams memory params = _createCancelParams(betId, picks, bettor, bettorPk, deadline);
+
+		// Warp past deadline
+		vm.warp(deadline + 1);
+
+		vm.expectRevert(FlexComboMachine.SignatureExpired.selector);
+		flex.cancelBet(params);
+	}
+
+	/// @dev Cancel increments wallet nonce
+	function test_cancelBet_incrementsNonce() public {
+		(uint256 betId, FlexComboMachine.Pick[] memory picks, ) = _placeDefaultBet();
+
+		uint256 nonceBefore = flex.wallet_nonce(bettor);
+		_cancelBetWithSigs(betId, picks, bettor, bettorPk);
+		assertEq(flex.wallet_nonce(bettor), nonceBefore + 1);
+	}
+
+	/// @dev Cancel fee bps can be updated via updateConfiguration
+	function test_cancelFeeBps_updateConfiguration() public {
+		vm.prank(contractOwner);
+		flex.updateConfiguration(address(0), address(0), 0, 0, 500); // 5%
+
+		assertEq(flex.cancel_fee_bps(), 500);
+
+		// Skip update with type(uint16).max
+		vm.prank(contractOwner);
+		flex.updateConfiguration(address(0), address(0), 0, 0, type(uint16).max);
+
+		assertEq(flex.cancel_fee_bps(), 500); // unchanged
 	}
 
 	// ─── Emergency Withdraw ───

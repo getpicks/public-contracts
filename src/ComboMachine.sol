@@ -13,9 +13,11 @@ import {IEventMarketRegistry} from "./IEventMarketRegistry.sol";
 interface IHotTreasury {
 	function CREDIT_TOKEN_ADDRESS() external view returns (address);
 
-	function drain(address token, address to, uint256 amount) external;
+	function drain(address to, uint256 amount) external;
 
 	function burnCredit(uint256 amount) external;
+
+	function depositFor(address user, address token, uint256 amount) external;
 }
 
 /// @title ComboMachine - Decentralized Betting Platform with Meta-Transaction Support
@@ -50,6 +52,7 @@ contract ComboMachine is Initializable, Pausable {
 	bytes32 internal constant SETTLE_BET_TYPEHASH = keccak256("settleBet");
 	bytes32 internal constant BATCH_SETTLE_BET_TYPEHASH = keccak256("batchSettleBet");
 	bytes32 internal constant PLACE_BET_TYPEHASH = keccak256("placeBet");
+	bytes32 internal constant CANCEL_BET_TYPEHASH = keccak256("cancelBet");
 
 	bytes12 internal constant VOIDED_EVENT_OUTCOME_ID = bytes12(0);
 
@@ -146,6 +149,16 @@ contract ComboMachine is Initializable, Pausable {
 		bytes owner_signature;
 	}
 
+	/// @notice Parameters for canceling a single bet
+	struct CancelBetParams {
+		uint256 bet_id;
+		Pick[] picks;
+		address bet_owner;
+		uint256 deadline;
+		bytes owner_signature;
+		bytes automated_authority_signature;
+	}
+
 	/// @notice Packed coin configuration
 	CoinConfig public coin_config;
 
@@ -185,6 +198,9 @@ contract ComboMachine is Initializable, Pausable {
 	/// @notice Address of the shared event market registry
 	address public event_market_registry_address;
 
+	/// @notice Cancel fee in basis points (e.g. 1000 = 10%)
+	uint16 public cancel_fee_bps;
+
 	/// @dev bet_size is in INTERNAL_DECIMALS (18)
 	event BetPlaced(
 		address indexed owner_address,
@@ -203,7 +219,7 @@ contract ComboMachine is Initializable, Pausable {
 
 	event BetRefunded(address indexed owner_address, uint256 indexed bet_id);
 
-	event BetCanceled(address indexed owner_address, uint256 indexed bet_id);
+	event BetCanceledByUser(address indexed owner_address, uint256 indexed bet_id, uint128 refund_amount, uint128 fee_amount, uint16 fee_bps);
 
 	event BetSeized(address indexed owner_address, uint256 indexed bet_id);
 
@@ -220,7 +236,8 @@ contract ComboMachine is Initializable, Pausable {
 		address automated_authority_address,
 		address hot_treasury_address,
 		uint128 min_bet_size,
-		uint128 max_bet_size
+		uint128 max_bet_size,
+		uint16 cancel_fee_bps
 	);
 
 	event MultiplierConfigAdded(uint24 indexed config_id, uint256[] multipliers);
@@ -250,6 +267,7 @@ contract ComboMachine is Initializable, Pausable {
 	error EventMarketsNotSettled();
 	error BetSizePrecisionLoss();
 	error SignatureExpired();
+	error CancelWindowClosed();
 	error OwnableUnauthorizedAccount(address account);
 	error OwnableInvalidOwner(address owner);
 
@@ -357,6 +375,10 @@ contract ComboMachine is Initializable, Pausable {
 		credit_token_address = _credit_token_address;
 		hot_treasury_address = _hot_treasury_address;
 		event_market_registry_address = _event_market_registry_address;
+
+		// Approve treasury to pull tokens from this contract
+		IERC20(_coin_address).approve(_hot_treasury_address, type(uint256).max);
+		IERC20(_credit_token_address).approve(_hot_treasury_address, type(uint256).max);
 	}
 
 	/// @notice Places a new bet with multiple picks (parlay/accumulator bet)
@@ -463,17 +485,17 @@ contract ComboMachine is Initializable, Pausable {
 			uint256 converted_back = _coinAmountToBetSizeWithDecimals(coin_amount, coin_cfg.decimals);
 			if (converted_back != params.bet_size) revert BetSizePrecisionLoss();
 
-			IERC20(coin_cfg.token_address).safeTransferFrom(
+			IHotTreasury(hot_treasury_address).depositFor(
 				params.bet_owner,
-				hot_treasury_address,
+				coin_cfg.token_address,
 				coin_amount
 			);
 		} else {
 			// Credit token: already in 18 decimals, no conversion needed
 			if (params.bet_size == 0) revert InvalidBetSize();
-			IERC20(credit_token_address).safeTransferFrom(
+			IHotTreasury(hot_treasury_address).depositFor(
 				params.bet_owner,
-				hot_treasury_address,
+				credit_token_address,
 				params.bet_size
 			);
 		}
@@ -645,22 +667,15 @@ contract ComboMachine is Initializable, Pausable {
 	/// @param bet_size Amount to refund in internal decimals
 	/// @param token_type Token type (0 = regular, 1 = credit)
 	function _withdrawBetFunds(address wallet_address, uint128 bet_size, uint8 token_type) internal {
+		// Convert to coin decimals — drains are always in real token
+		uint256 amount_in_coin_decimals;
 		if (token_type == 0) {
-			CoinConfig memory coin_cfg = coin_config;
-			// Regular token: convert from internal decimals to token decimals
-			uint256 amount_in_coin_decimals = _betSizeToCoinAmountWithDecimals(
-				bet_size,
-				coin_cfg.decimals
-			);
-			IHotTreasury(hot_treasury_address).drain(
-				coin_cfg.token_address,
-				wallet_address,
-				amount_in_coin_decimals
-			);
+			amount_in_coin_decimals = _betSizeToCoinAmountWithDecimals(bet_size, coin_config.decimals);
 		} else {
-			// Credit token: already in 18 decimals, no conversion needed
-			IHotTreasury(hot_treasury_address).drain(credit_token_address, wallet_address, bet_size);
+			// Credit bets: convert from 18 decimals to coin decimals
+			amount_in_coin_decimals = _betSizeToCoinAmountWithDecimals(bet_size, coin_config.decimals);
 		}
+		IHotTreasury(hot_treasury_address).drain(wallet_address, amount_in_coin_decimals);
 	}
 
 	/// @notice Settles a bet after all its event markets have been resolved
@@ -787,11 +802,7 @@ contract ComboMachine is Initializable, Pausable {
 			// Convert to coin decimals and drain regular tokens from treasury to the winner
 			// NOTE: Payouts are ALWAYS in regular tokens, regardless of token_type used for bet
 			uint256 payout_in_coin_decimals = _betSizeToCoinAmountWithDecimals(payout, coin_cfg.decimals);
-			IHotTreasury(hot_treasury_address).drain(
-				coin_cfg.token_address,
-				bet.owner,
-				payout_in_coin_decimals
-			);
+			IHotTreasury(hot_treasury_address).drain(bet.owner, payout_in_coin_decimals);
 		}
 
 		emit BetSettled(bet.owner, bet_id, all_non_voided_picks_won, payout);
@@ -836,10 +847,83 @@ contract ComboMachine is Initializable, Pausable {
 		}
 	}
 
-	/// @notice Performs administrative enforcement action on a bet (activate, freeze, refund, cancel, or seize)
-	/// @dev Can only be called by compliance officer. Refunds and cancellations automatically return funds to bettor.
+	/// @notice Allows a user to cancel their own active bet before any event reaches settlement time
+	/// @dev Requires both owner and automated authority signatures. Deducts cancel_fee_bps from bet_size, refunds the rest.
+	/// @param params Struct containing all cancel parameters including signatures
+	function cancelBet(CancelBetParams calldata params) external whenNotPaused {
+		_verifySignaturesAndCancelBet(params);
+	}
+
+	/// @notice Cancels multiple bets in a single transaction
+	/// @dev Each cancel is independently signed by its owner and the automated authority
+	/// @param cancel_params Array of cancel parameters, one for each bet
+	function batchCancelBet(CancelBetParams[] calldata cancel_params) external whenNotPaused {
+		uint256 batch_size = cancel_params.length;
+		if (batch_size == 0) revert InvalidInput();
+
+		for (uint256 i = 0; i < batch_size; ++i) {
+			_verifySignaturesAndCancelBet(cancel_params[i]);
+		}
+	}
+
+	/// @notice Internal function to verify cancel signatures and execute the cancel
+	function _verifySignaturesAndCancelBet(CancelBetParams calldata params) internal {
+		if (block.timestamp > params.deadline) revert SignatureExpired();
+
+		uint256 current_nonce = wallet_nonce[params.bet_owner];
+		bytes32 message_hash = keccak256(
+			abi.encode(
+				CANCEL_BET_TYPEHASH,
+				block.chainid,
+				address(this),
+				params.bet_owner,
+				params.bet_id,
+				params.picks,
+				params.deadline,
+				current_nonce
+			)
+		);
+		_verifyOwnerSignature(message_hash, params.owner_signature, params.bet_owner);
+		_verifyAutomatedAuthoritySignature(message_hash, params.automated_authority_signature);
+
+		wallet_nonce[params.bet_owner] = current_nonce + 1;
+
+		_cancelBet(params.bet_id, params.picks, params.bet_owner);
+	}
+
+	/// @notice Internal function to cancel a bet
+	function _cancelBet(uint256 bet_id, Pick[] calldata picks, address bet_owner) internal {
+		if (bet_id >= bets.length) revert BetDoesNotExist();
+
+		Bet storage bet = bets[bet_id];
+
+		if (bet.status != STATUS_ACTIVE) revert BetNotActive();
+		if (bet.owner != bet_owner) revert Unauthorized();
+		if (keccak256(abi.encode(picks)) != bet.picks_hash) revert InvalidInput();
+
+		// Check no event has reached min_settlement_ts
+		IEventMarketRegistry registry = IEventMarketRegistry(event_market_registry_address);
+		uint256 picks_count = picks.length;
+		for (uint256 i = 0; i < picks_count; ++i) {
+			IEventMarketRegistry.EventMarket memory em = registry.getEventMarket(picks[i].event_market_id);
+			if (block.timestamp >= em.min_settlement_ts) revert CancelWindowClosed();
+		}
+
+		bet.status = STATUS_CANCELED;
+
+		uint128 fee = (bet.bet_size * cancel_fee_bps) / 10000;
+		uint128 refund = bet.bet_size - fee;
+
+		// Fee stays in treasury, only refund the net amount
+		_withdrawBetFunds(bet.owner, refund, bet.token_type);
+
+		emit BetCanceledByUser(bet.owner, bet_id, refund, fee, cancel_fee_bps);
+	}
+
+	/// @notice Performs administrative enforcement action on a bet (activate, freeze, refund, or seize)
+	/// @dev Can only be called by compliance officer. Refunds automatically return funds to bettor.
 	/// @param bet_id Index of the bet in the bets array
-	/// @param new_status New administrative status (ACTIVE=0, FROZEN=1, REFUNDED=2, CANCELED=3, SEIZED=4)
+	/// @param new_status New administrative status (ACTIVE=0, FROZEN=1, REFUNDED=2, SEIZED=4)
 	function enforceBetStatus(uint256 bet_id, uint8 new_status) external onlyComplianceOfficer {
 		if (bet_id >= bets.length) revert BetDoesNotExist();
 
@@ -861,12 +945,6 @@ contract ComboMachine is Initializable, Pausable {
 			bet.status = STATUS_REFUNDED;
 			_withdrawBetFunds(bet.owner, bet.bet_size, bet.token_type);
 			emit BetRefunded(bet.owner, bet_id);
-		} else if (new_status == STATUS_CANCELED) {
-			if (bet.status != STATUS_ACTIVE && bet.status != STATUS_FROZEN) revert BetNotActive();
-
-			bet.status = STATUS_CANCELED;
-			_withdrawBetFunds(bet.owner, bet.bet_size, bet.token_type);
-			emit BetCanceled(bet.owner, bet_id);
 		} else if (new_status == STATUS_SEIZED) {
 			if (bet.status != STATUS_ACTIVE && bet.status != STATUS_FROZEN) revert BetNotActive();
 
@@ -923,11 +1001,13 @@ contract ComboMachine is Initializable, Pausable {
 	/// @param new_hot_treasury_address New hot treasury address (or address(0) to skip)
 	/// @param new_min_bet_size New minimum bet size (or 0 to skip)
 	/// @param new_max_bet_size New maximum bet size (or 0 to skip)
+	/// @param new_cancel_fee_bps New cancel fee in basis points (or type(uint16).max to skip)
 	function updateConfiguration(
 		address new_automated_authority_address,
 		address new_hot_treasury_address,
 		uint128 new_min_bet_size,
-		uint128 new_max_bet_size
+		uint128 new_max_bet_size,
+		uint16 new_cancel_fee_bps
 	) external onlyOwner {
 		// Update automated_authority address if provided
 		if (new_automated_authority_address != address(0)) {
@@ -949,11 +1029,17 @@ contract ComboMachine is Initializable, Pausable {
 			bet_limits.max_bet_size = new_max_bet_size;
 		}
 
+		// Update cancel fee if provided (type(uint16).max = skip)
+		if (new_cancel_fee_bps != type(uint16).max) {
+			cancel_fee_bps = new_cancel_fee_bps;
+		}
+
 		emit ConfigurationUpdated(
 			automated_authority_address,
 			hot_treasury_address,
 			bet_limits.min_bet_size,
-			bet_limits.max_bet_size
+			bet_limits.max_bet_size,
+			cancel_fee_bps
 		);
 	}
 
@@ -1085,6 +1171,13 @@ contract ComboMachine is Initializable, Pausable {
 	/// @param amount Amount of tokens to withdraw
 	function emergencyWithdrawErc20(address token, uint256 amount) external onlyOwner {
 		IERC20(token).safeTransfer(msg.sender, amount);
+	}
+
+	/// @notice Approves the treasury to spend this contract's tokens (max approval)
+	/// @dev Anyone can call — only approves from this contract, not from the caller
+	function approveTreasuryForTokens() external {
+		IERC20(coin_config.token_address).approve(hot_treasury_address, type(uint256).max);
+		IERC20(credit_token_address).approve(hot_treasury_address, type(uint256).max);
 	}
 
 	uint256[45] private __gap;
