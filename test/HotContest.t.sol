@@ -48,11 +48,9 @@ contract HotContestTest is Test {
 	address public userB = makeAddr("userB");
 	address public stranger = makeAddr("stranger");
 
-	function _setCaps(uint256 amount, uint16 pnlBps, uint16 drainBps, uint16 adminBps) internal {
-		vm.startPrank(owner);
-		contest.setMaxPnlAmount(amount);
-		contest.updateBpsCaps(HotContest.BpsCaps(pnlBps, drainBps, adminBps));
-		vm.stopPrank();
+	function _setCaps(uint16 drainBps, uint16 globalPnlBps, uint16 adminBps) internal {
+		vm.prank(owner);
+		contest.updateBpsCaps(HotContest.BpsCaps(drainBps, globalPnlBps, adminBps));
 	}
 
 	function setUp() public {
@@ -72,7 +70,12 @@ contract HotContestTest is Test {
 		vm.prank(userB);
 		usdc.approve(address(contest), type(uint256).max);
 
-		usdc.mint(address(contest), 10_000_000e6);
+		// Fund treasury via deposit() so coin_balance is tracked
+		usdc.mint(owner, 10_000_000e6);
+		vm.startPrank(owner);
+		usdc.approve(address(contest), type(uint256).max);
+		contest.deposit(10_000_000e6);
+		vm.stopPrank();
 	}
 
 	// ─── Constructor ───
@@ -114,12 +117,39 @@ contract HotContestTest is Test {
 		assertFalse(contest.whitelisted_contracts(machine));
 	}
 
+	// ─── Deposit (owner) ───
+
+	function test_deposit_tracksBalance() public {
+		usdc.mint(owner, 1_000_000e6);
+		vm.startPrank(owner);
+		usdc.approve(address(contest), type(uint256).max);
+		contest.deposit(1_000_000e6);
+		vm.stopPrank();
+		assertEq(contest.getBalance(), 11_000_000e6);
+	}
+
+	function test_deposit_revertsZeroAmount() public {
+		vm.prank(owner);
+		vm.expectRevert(HotContest.InvalidInput.selector);
+		contest.deposit(0);
+	}
+
+	function test_deposit_revertsNonOwner() public {
+		usdc.mint(stranger, 1e6);
+		vm.prank(stranger);
+		usdc.approve(address(contest), 1e6);
+		vm.prank(stranger);
+		vm.expectRevert();
+		contest.deposit(1e6);
+	}
+
 	// ─── DepositFor ───
 
 	function test_depositFor_coin() public {
 		vm.prank(machine);
 		contest.depositFor(userA, address(usdc), 100e6);
 		assertEq(usdc.balanceOf(address(contest)), 10_000_100e6);
+		assertEq(contest.getBalance(), 10_000_100e6);
 	}
 
 	function test_depositFor_credit() public {
@@ -131,7 +161,8 @@ contract HotContestTest is Test {
 		contest.depositFor(userA, address(creditToken), 100e18);
 
 		assertEq(creditToken.balanceOf(address(contest)), 100e18);
-		assertEq(contest.getUserPnl(userA), 0);
+		// Credit inflow is 100e6 coin-equivalent; no outflows → global PNL = 0
+		assertEq(contest.getGlobalPnl(), 0);
 	}
 
 	function test_depositFor_revertsUnauthorized() public {
@@ -159,6 +190,7 @@ contract HotContestTest is Test {
 		vm.prank(machine);
 		contest.drain(userA, address(usdc), 100e6);
 		assertEq(usdc.balanceOf(userA), 1_000_100e6);
+		assertEq(contest.getBalance(), 9_999_900e6);
 	}
 
 	function test_drain_revertsUnauthorized() public {
@@ -173,83 +205,68 @@ contract HotContestTest is Test {
 		contest.drain(userA, address(usdc), 0);
 	}
 
-	// ─── PNL Amount Cap ───
+	// ─── Global PNL BPS Cap ───
 
-	function test_drain_revertsPnlAmountExceeded() public {
-		_setCaps(500e6, 0, 0, 0);
-
-		vm.prank(machine);
-		contest.depositFor(userA, address(usdc), 100e6);
+	function test_drain_revertsGlobalPnlBpsExceeded() public {
+		_setCaps(0, 200, 0); // 2% of 10M = 200k limit
 
 		vm.prank(machine);
-		contest.drain(userA, address(usdc), 600e6);
+		contest.drain(userA, address(usdc), 200_000e6); // exactly at the limit
 
 		vm.prank(machine);
-		vm.expectRevert(HotContest.PnlAmountExceeded.selector);
+		vm.expectRevert(HotContest.GlobalPnlExceeded.selector);
 		contest.drain(userA, address(usdc), 1e6);
 	}
 
-	function test_drain_pnlResetsAfterWindow() public {
-		_setCaps(500e6, 0, 0, 0);
+	function test_drain_globalPnlResetsAfterWindow() public {
+		_setCaps(0, 200, 0); // 2% of 10M = 200k limit
 
 		vm.prank(machine);
-		contest.drain(userA, address(usdc), 500e6);
+		contest.drain(userA, address(usdc), 200_000e6);
 
 		vm.prank(machine);
-		vm.expectRevert(HotContest.PnlAmountExceeded.selector);
+		vm.expectRevert(HotContest.GlobalPnlExceeded.selector);
 		contest.drain(userA, address(usdc), 1e6);
 
 		vm.warp(block.timestamp + 14 days);
 
+		// After window expires, balance is 9.8M → 2% = 196k
 		vm.prank(machine);
-		contest.drain(userA, address(usdc), 500e6);
+		contest.drain(userA, address(usdc), 190_000e6);
 	}
 
-	function test_drain_depositsReducePnl() public {
-		_setCaps(500e6, 0, 0, 0);
+	function test_drain_globalPnlReducedByDeposits() public {
+		_setCaps(0, 5000, 0); // 50% cap — high enough not to block
 
 		vm.prank(machine);
-		contest.depositFor(userA, address(usdc), 1000e6);
+		contest.depositFor(userA, address(usdc), 1_000_000e6);
 
 		vm.prank(machine);
-		contest.drain(userA, address(usdc), 1500e6);
+		contest.drain(userA, address(usdc), 1_500_000e6);
 
-		assertEq(contest.getUserPnl(userA), 500e6);
+		assertEq(contest.getGlobalPnl(), 500_000e6);
 	}
 
-	function test_drain_creditDepositReducesPnl() public {
-		_setCaps(500e6, 0, 0, 0);
+	function test_drain_creditDepositReducesGlobalPnl() public {
+		_setCaps(0, 5000, 0); // 50% cap
 
 		creditToken.mint(userA, 1000e18);
 		vm.prank(userA);
 		creditToken.approve(address(contest), type(uint256).max);
 
 		vm.prank(machine);
-		contest.depositFor(userA, address(creditToken), 1000e18);
+		contest.depositFor(userA, address(creditToken), 1000e18); // 1000 USDC-equivalent inflow
 
 		vm.prank(machine);
 		contest.drain(userA, address(usdc), 1500e6);
 
-		assertEq(contest.getUserPnl(userA), 500e6);
-	}
-
-	// ─── PNL BPS Cap ───
-
-	function test_drain_revertsPnlBpsExceeded() public {
-		_setCaps(0, 200, 0, 0); // 2%
-
-		vm.prank(machine);
-		contest.drain(userA, address(usdc), 200_000e6);
-
-		vm.prank(machine);
-		vm.expectRevert(HotContest.PnlBpsExceeded.selector);
-		contest.drain(userA, address(usdc), 1e6);
+		assertEq(contest.getGlobalPnl(), 500e6);
 	}
 
 	// ─── Global Daily Drain Cap ───
 
 	function test_drain_revertsDailyDrainExceeded() public {
-		_setCaps(0, 0, 1000, 0); // 10%
+		_setCaps(1000, 0, 0); // 10%
 
 		vm.prank(machine);
 		contest.drain(userA, address(usdc), 1_000_000e6);
@@ -260,44 +277,47 @@ contract HotContestTest is Test {
 	}
 
 	function test_drain_dailyDrainResetsNextDay() public {
-		_setCaps(0, 0, 1000, 0); // 10%
+		_setCaps(1000, 0, 0); // 10%
 
 		vm.prank(machine);
 		contest.drain(userA, address(usdc), 1_000_000e6);
 
 		vm.warp(block.timestamp + 1 days);
 
+		// coin_balance is now 9M → 10% = 900k
 		vm.prank(machine);
 		contest.drain(userA, address(usdc), 900_000e6);
 	}
 
 	function test_drain_dailyDrainAcrossMultipleUsers() public {
-		_setCaps(0, 0, 1000, 0); // 10%
+		_setCaps(1000, 0, 0); // 10% of 10M = 1M limit
 
 		vm.prank(machine);
 		contest.drain(userA, address(usdc), 500_000e6);
 
 		vm.prank(machine);
-		contest.drain(userB, address(usdc), 450_000e6);
+		contest.drain(userB, address(usdc), 450_000e6); // total: 950k
 
+		// Remaining capacity: 50k. Any amount over that must revert.
 		vm.prank(machine);
 		vm.expectRevert(HotContest.DailyDrainExceeded.selector);
-		contest.drain(userB, address(usdc), 1e6);
+		contest.drain(userB, address(usdc), 50_001e6);
 	}
 
 	// ─── Admin Withdrawal Limit ───
 
 	function test_withdraw_success() public {
-		_setCaps(0, 0, 0, 500); // 5%
+		_setCaps(0, 0, 500); // 5%
 
 		vm.prank(owner);
 		contest.withdraw(owner, 500_000e6);
 
 		assertEq(usdc.balanceOf(owner), 500_000e6);
+		assertEq(contest.getBalance(), 9_500_000e6);
 	}
 
 	function test_withdraw_revertsExceedsDailyCap() public {
-		_setCaps(0, 0, 0, 500); // 5%
+		_setCaps(0, 0, 500); // 5%
 
 		vm.prank(owner);
 		contest.withdraw(owner, 500_000e6);
@@ -308,13 +328,14 @@ contract HotContestTest is Test {
 	}
 
 	function test_withdraw_resetsNextDay() public {
-		_setCaps(0, 0, 0, 500); // 5%
+		_setCaps(0, 0, 500); // 5%
 
 		vm.prank(owner);
 		contest.withdraw(owner, 500_000e6);
 
 		vm.warp(block.timestamp + 1 days);
 
+		// coin_balance is now 9.5M → 5% = 475k
 		vm.prank(owner);
 		contest.withdraw(owner, 475_000e6);
 	}
@@ -331,38 +352,297 @@ contract HotContestTest is Test {
 		contest.withdraw(stranger, 100e6);
 	}
 
-	// ─── Admin Credit PNL ───
+	// ─── Credit Caps ───
 
-	function test_adminCreditPnl_unblocksDrain() public {
-		_setCaps(500e6, 0, 0, 0);
+	function test_depositFor_credit_revertsAbsoluteCap() public {
+		vm.prank(owner);
+		contest.setMaxCreditBalance(100e18); // max 100 credits
+
+		creditToken.mint(userA, 101e18);
+		vm.prank(userA);
+		creditToken.approve(address(contest), type(uint256).max);
 
 		vm.prank(machine);
-		contest.drain(userA, address(usdc), 500e6);
+		vm.expectRevert(HotContest.CreditCapExceeded.selector);
+		contest.depositFor(userA, address(creditToken), 101e18);
+	}
+
+	function test_depositFor_credit_absoluteCapAccumulatesAcrossDeposits() public {
+		vm.prank(owner);
+		contest.setMaxCreditBalance(100e18);
+
+		creditToken.mint(userA, 200e18);
+		vm.prank(userA);
+		creditToken.approve(address(contest), type(uint256).max);
 
 		vm.prank(machine);
-		vm.expectRevert(HotContest.PnlAmountExceeded.selector);
-		contest.drain(userA, address(usdc), 100e6);
+		contest.depositFor(userA, address(creditToken), 60e18); // ok: 60 <= 100
+
+		vm.prank(machine);
+		vm.expectRevert(HotContest.CreditCapExceeded.selector);
+		contest.depositFor(userA, address(creditToken), 41e18); // 60+41=101 > 100
+	}
+
+	function test_depositFor_credit_revertsRatioCap() public {
+		// coin_balance = 10M USDC, ratio cap 1% = 100k USDC-equivalent credits max
+		vm.prank(owner);
+		contest.setMaxCreditCoinRatioBps(100); // 1%
+
+		creditToken.mint(userA, 100_001e18);
+		vm.prank(userA);
+		creditToken.approve(address(contest), type(uint256).max);
+
+		vm.prank(machine);
+		vm.expectRevert(HotContest.CreditRatioExceeded.selector);
+		contest.depositFor(userA, address(creditToken), 100_001e18); // > 1% of 10M
+	}
+
+	function test_depositFor_credit_ratioCapPassesAtLimit() public {
+		vm.prank(owner);
+		contest.setMaxCreditCoinRatioBps(100); // 1% of 10M = 100k USDC-eq
+
+		creditToken.mint(userA, 100_000e18);
+		vm.prank(userA);
+		creditToken.approve(address(contest), type(uint256).max);
+
+		vm.prank(machine);
+		contest.depositFor(userA, address(creditToken), 100_000e18); // exactly at limit
+	}
+
+	function test_depositFor_credit_zeroCapsAreUnlimited() public {
+		// Both caps default to 0 = unlimited
+		creditToken.mint(userA, 1_000_000e18);
+		vm.prank(userA);
+		creditToken.approve(address(contest), type(uint256).max);
+
+		vm.prank(machine);
+		contest.depositFor(userA, address(creditToken), 1_000_000e18);
+	}
+
+	function test_setMaxCreditCoinRatioBps_revertsInvalidBps() public {
+		vm.prank(owner);
+		vm.expectRevert(HotContest.InvalidBps.selector);
+		contest.setMaxCreditCoinRatioBps(10001);
+	}
+
+	// ─── Snapshot Encoding (zero-balance edge case) ───
+
+	function test_snapshot_zeroBalanceIsCorrectlyEncoded() public {
+		// Fresh contest: coin_balance == 0, admin withdraw cap = 10%.
+		// We set the snapshot by draining a credit token — this succeeds even with
+		// zero coin_balance because coin_balance is not decremented for credit drains.
+		// The snapshot is written as coin_balance + 1 = 1 (encodes balance = 0).
+		// A subsequent USDC deposit must not overwrite that snapshot, so a same-day
+		// admin withdraw must still see a 10%-of-0 = 0 limit and revert.
+		HotContest empty = new HotContest(address(usdc), address(creditToken), owner);
+		vm.startPrank(owner);
+		empty.addToWhitelist(machine);
+		empty.updateBpsCaps(HotContest.BpsCaps(0, 0, 1000)); // 10% admin cap
+		vm.stopPrank();
+
+		// Give the contract some credit to drain (so safeTransfer doesn't fail)
+		creditToken.mint(address(empty), 1e18);
+
+		// Drain credit: sets daily_balance_snapshot to coin_balance=0 (stored as 0+1=1).
+		// Credit drains do not decrement coin_balance, so this succeeds with an empty treasury.
+		vm.prank(machine);
+		empty.drain(userA, address(creditToken), 1e18);
+
+		// Owner deposits USDC same day — coin_balance becomes 1000e6
+		usdc.mint(owner, 1000e6);
+		vm.startPrank(owner);
+		usdc.approve(address(empty), type(uint256).max);
+		empty.deposit(1000e6);
+
+		// Snapshot is locked at 0 for the day: 10% of 0 = 0 limit → any withdraw reverts
+		vm.expectRevert(HotContest.AdminWithdrawExceeded.selector);
+		empty.withdraw(owner, 1e6);
+		vm.stopPrank();
+	}
+
+	function test_snapshot_notOverwrittenBySameDayDeposit() public {
+		// Normal contest with 10M. Admin cap = 10% → limit = 1M for today.
+		// After setting the snapshot via a withdraw, a large same-day deposit must
+		// not raise the limit — the snapshot is locked for the rest of the day.
+		_setCaps(0, 0, 1000); // 10% admin cap
+
+		// First withdraw: sets snapshot at 10M, limit = 1M
+		vm.prank(owner);
+		contest.withdraw(owner, 1e6); // uses 1e6 of the 1M daily limit
+
+		// Large same-day deposit — coin_balance rises to ~14.999M
+		usdc.mint(owner, 5_000_000e6);
+		vm.startPrank(owner);
+		usdc.approve(address(contest), type(uint256).max);
+		contest.deposit(5_000_000e6);
+
+		// Remaining capacity is still based on opening snapshot (10M → 1M limit):
+		// 1M - 1e6 already used = 999_999e6 remaining
+		contest.withdraw(owner, 999_999e6); // exactly fills remaining capacity
+
+		vm.expectRevert(HotContest.AdminWithdrawExceeded.selector);
+		contest.withdraw(owner, 1e6); // over the original 1M limit
+		vm.stopPrank();
+	}
+
+	// ─── Withdraw Excess Coin ───
+
+	function test_withdrawExcessCoin_sweepsDirectTransfer() public {
+		// Simulate accidental direct transfer (bypasses deposit())
+		usdc.mint(address(contest), 500e6);
+
+		uint256 before = usdc.balanceOf(owner);
+		vm.prank(owner);
+		contest.withdrawExcessCoin(owner);
+
+		assertEq(usdc.balanceOf(owner), before + 500e6);
+		assertEq(contest.getBalance(), 10_000_000e6); // coin_balance unchanged
+	}
+
+	function test_withdrawExcessCoin_doesNotTouchCoinBalance() public {
+		usdc.mint(address(contest), 1_000e6);
 
 		vm.prank(owner);
-		contest.adminCreditPnl(userA, 200e6);
+		contest.withdrawExcessCoin(owner);
 
-		vm.prank(machine);
-		contest.drain(userA, address(usdc), 200e6);
-
-		assertEq(contest.getUserPnl(userA), 500e6);
+		// coin_balance still reflects only properly deposited funds
+		assertEq(contest.getBalance(), 10_000_000e6);
 	}
 
-	function test_adminCreditPnl_revertsNonOwner() public {
-		vm.prank(stranger);
-		vm.expectRevert();
-		contest.adminCreditPnl(userA, 100e6);
-	}
-
-	function test_adminCreditPnl_revertsZeroAmount() public {
+	function test_withdrawExcessCoin_revertsWhenNoExcess() public {
+		// No direct transfers — actual balance equals coin_balance
 		vm.prank(owner);
 		vm.expectRevert(HotContest.InvalidInput.selector);
-		contest.adminCreditPnl(userA, 0);
+		contest.withdrawExcessCoin(owner);
 	}
+
+	function test_withdrawExcessCoin_revertsNonOwner() public {
+		usdc.mint(address(contest), 1e6);
+		vm.prank(stranger);
+		vm.expectRevert();
+		contest.withdrawExcessCoin(stranger);
+	}
+
+	function test_withdrawExcessCoin_revertsZeroAddress() public {
+		usdc.mint(address(contest), 1e6);
+		vm.prank(owner);
+		vm.expectRevert(HotContest.InvalidInput.selector);
+		contest.withdrawExcessCoin(address(0));
+	}
+
+	function test_withdrawExcessCoin_snapshotUnaffected() public {
+		_setCaps(1000, 0, 0); // 10% daily drain cap
+
+		// First drain of the day — sets snapshot at 10M, limit = 1M
+		vm.prank(machine);
+		contest.drain(userA, address(usdc), 500_000e6);
+
+		// Direct transfer of excess USDC (not via deposit)
+		usdc.mint(address(contest), 5_000_000e6);
+
+		// Sweep the excess — must not overwrite today's snapshot
+		vm.prank(owner);
+		contest.withdrawExcessCoin(owner);
+
+		// Remaining capacity for the day is still based on opening snapshot of 10M:
+		// 1M limit - 500k already drained = 500k remaining
+		vm.prank(machine);
+		contest.drain(userB, address(usdc), 500_000e6); // exactly fills remaining capacity
+
+		vm.prank(machine);
+		vm.expectRevert(HotContest.DailyDrainExceeded.selector);
+		contest.drain(userB, address(usdc), 1e6); // over the original limit
+	}
+
+	function test_withdrawExcessCoin_bypassesDailyCap() public {
+		_setCaps(0, 0, 1); // 0.01% admin cap — would normally block any meaningful withdrawal
+
+		usdc.mint(address(contest), 5_000_000e6); // large direct transfer
+
+		vm.prank(owner);
+		contest.withdrawExcessCoin(owner); // should not revert despite tiny cap
+		assertEq(usdc.balanceOf(owner), 5_000_000e6);
+	}
+
+	// ─── Recover Token ───
+
+	function test_recoverToken_sweepsStrandedErc20() public {
+		MockToken rando = new MockToken("RANDO", 18);
+		rando.mint(address(contest), 999e18);
+
+		vm.prank(owner);
+		contest.recoverToken(address(rando), owner);
+
+		assertEq(rando.balanceOf(owner), 999e18);
+		assertEq(rando.balanceOf(address(contest)), 0);
+	}
+
+	function test_recoverToken_revertsCoinAddress() public {
+		vm.prank(owner);
+		vm.expectRevert(HotContest.InvalidToken.selector);
+		contest.recoverToken(address(usdc), owner);
+	}
+
+	function test_recoverToken_revertsCreditToken() public {
+		vm.prank(owner);
+		vm.expectRevert(HotContest.InvalidToken.selector);
+		contest.recoverToken(address(creditToken), owner);
+	}
+
+	function test_recoverToken_revertsZeroBalance() public {
+		MockToken rando = new MockToken("RANDO", 18);
+		vm.prank(owner);
+		vm.expectRevert(HotContest.InvalidInput.selector);
+		contest.recoverToken(address(rando), owner);
+	}
+
+	function test_recoverToken_revertsNonOwner() public {
+		MockToken rando = new MockToken("RANDO", 18);
+		rando.mint(address(contest), 1e18);
+		vm.prank(stranger);
+		vm.expectRevert();
+		contest.recoverToken(address(rando), stranger);
+	}
+
+	function test_recoverToken_revertsZeroAddress() public {
+		MockToken rando = new MockToken("RANDO", 18);
+		rando.mint(address(contest), 1e18);
+		vm.prank(owner);
+		vm.expectRevert(HotContest.InvalidInput.selector);
+		contest.recoverToken(address(rando), address(0));
+	}
+
+	function test_recoverToken_emitsTokenRecovered() public {
+		MockToken rando = new MockToken("RANDO", 18);
+		rando.mint(address(contest), 999e18);
+
+		vm.prank(owner);
+		vm.expectEmit(true, true, false, true);
+		emit HotContest.TokenRecovered(address(rando), owner, 999e18);
+		contest.recoverToken(address(rando), owner);
+	}
+
+	function test_withdrawExcessCoin_emitsExcessCoinWithdrawn() public {
+		usdc.mint(address(contest), 500e6);
+
+		vm.prank(owner);
+		vm.expectEmit(true, false, false, true);
+		emit HotContest.ExcessCoinWithdrawn(owner, 500e6);
+		contest.withdrawExcessCoin(owner);
+	}
+
+	// ─── BurnCredit ───
+
+	function test_burnCredit() public {
+		creditToken.mint(address(contest), 100e18);
+
+		vm.prank(machine);
+		contest.burnCredit(100e18);
+
+		assertEq(creditToken.balanceOf(address(contest)), 0);
+	}
+
+	// ─── BPS Caps Config ───
 
 	function test_updateBpsCaps_revertsInvalidBps() public {
 		vm.prank(owner);
@@ -384,47 +664,40 @@ contract HotContestTest is Test {
 		contest.updateBpsCaps(HotContest.BpsCaps(100, 0, 0));
 	}
 
-	function test_setMaxPnlAmount_revertsNonOwner() public {
-		vm.prank(stranger);
-		vm.expectRevert();
-		contest.setMaxPnlAmount(100e6);
-	}
+	function test_updateCaps() public {
+		vm.prank(owner);
+		contest.updateBpsCaps(HotContest.BpsCaps(1000, 200, 500));
 
-	// ─── BurnCredit ───
-
-	function test_burnCredit() public {
-		creditToken.mint(address(contest), 100e18);
-
-		vm.prank(machine);
-		contest.burnCredit(100e18);
-
-		assertEq(creditToken.balanceOf(address(contest)), 0);
+		(uint16 a, uint16 b, uint16 c) = contest.bps_caps();
+		assertEq(a, 1000); // max_daily_drain_bps
+		assertEq(b, 200);  // max_global_pnl_bps
+		assertEq(c, 500);  // admin_daily_withdraw_bps
 	}
 
 	// ─── View Functions ───
 
-	function test_getUserPnl() public {
+	function test_getGlobalPnl() public {
 		vm.prank(machine);
 		contest.depositFor(userA, address(usdc), 100e6);
 
 		vm.prank(machine);
 		contest.drain(userA, address(usdc), 300e6);
 
-		assertEq(contest.getUserPnl(userA), 200e6);
+		assertEq(contest.getGlobalPnl(), 200e6);
 	}
 
-	function test_getUserPnl_zeroWhenInflowsExceedOutflows() public {
+	function test_getGlobalPnl_zeroWhenInflowsExceedOutflows() public {
 		vm.prank(machine);
 		contest.depositFor(userA, address(usdc), 500e6);
 
 		vm.prank(machine);
 		contest.drain(userA, address(usdc), 100e6);
 
-		assertEq(contest.getUserPnl(userA), 0);
+		assertEq(contest.getGlobalPnl(), 0);
 	}
 
 	function test_getGlobalDailyDrain() public {
-		_setCaps(0, 0, 5000, 0);
+		_setCaps(5000, 0, 0);
 
 		vm.prank(machine);
 		contest.drain(userA, address(usdc), 100e6);
@@ -433,7 +706,7 @@ contract HotContestTest is Test {
 	}
 
 	function test_getAdminWithdrawnToday() public {
-		_setCaps(0, 0, 0, 5000);
+		_setCaps(0, 0, 5000);
 
 		vm.prank(owner);
 		contest.withdraw(owner, 100e6);
@@ -445,103 +718,40 @@ contract HotContestTest is Test {
 		assertEq(contest.getBalance(), 10_000_000e6);
 	}
 
-	// ─── Caps Config ───
-
-	function test_updateCaps() public {
-		vm.prank(owner);
-		contest.setMaxPnlAmount(1000e6);
-		vm.prank(owner);
-		contest.updateBpsCaps(HotContest.BpsCaps(200, 1000, 500));
-
-		assertEq(contest.max_pnl_amount(), 1000e6);
-		(uint16 b, uint16 c, uint16 d) = contest.bps_caps();
-		assertEq(b, 200);
-		assertEq(c, 1000);
-		assertEq(d, 500);
-	}
-
 	// ─── Rolling Window ───
 
-	function test_rollingWindow_bucketsRotateCorrectly() public {
-		_setCaps(2000e6, 0, 0, 0);
+	function test_globalPnl_bucketsRotateCorrectly() public {
+		_setCaps(0, 5000, 0); // 50% — high enough not to block
 
 		vm.prank(machine);
-		contest.drain(userA, address(usdc), 200e6);
-		assertEq(contest.getUserPnl(userA), 200e6);
+		contest.drain(userA, address(usdc), 200_000e6); // day 0
+		assertEq(contest.getGlobalPnl(), 200_000e6);
 
 		vm.warp(block.timestamp + 5 days);
 		vm.prank(machine);
-		contest.drain(userA, address(usdc), 300e6);
-		assertEq(contest.getUserPnl(userA), 500e6);
+		contest.drain(userA, address(usdc), 300_000e6); // day 5
+		assertEq(contest.getGlobalPnl(), 500_000e6);
 
-		vm.warp(block.timestamp + 9 days);
-		assertEq(contest.getUserPnl(userA), 300e6);
+		vm.warp(block.timestamp + 9 days); // day 14 — day 0 bucket expired
+		assertEq(contest.getGlobalPnl(), 300_000e6);
 
-		vm.warp(block.timestamp + 5 days);
-		assertEq(contest.getUserPnl(userA), 0);
+		vm.warp(block.timestamp + 5 days); // day 19 — day 5 bucket expired
+		assertEq(contest.getGlobalPnl(), 0);
 	}
 
-	function test_rollingWindow_delayedSettlementStillSeeDeposit() public {
-		_setCaps(500e6, 0, 0, 0);
+	function test_globalPnl_depositFallsOutAfter14Days() public {
+		_setCaps(0, 5000, 0); // 50%
 
 		vm.prank(machine);
-		contest.depositFor(userA, address(usdc), 1000e6);
-
-		vm.warp(block.timestamp + 8 days);
-		vm.prank(machine);
-		contest.drain(userA, address(usdc), 1000e6);
-
-		assertEq(contest.getUserPnl(userA), 0);
-	}
-
-	function test_rollingWindow_settlementAtEdgeOfWindow() public {
-		_setCaps(500e6, 0, 0, 0);
-
-		vm.prank(machine);
-		contest.depositFor(userA, address(usdc), 1000e6);
-
-		vm.warp(block.timestamp + 13 days);
-		vm.prank(machine);
-		contest.drain(userA, address(usdc), 1500e6);
-
-		assertEq(contest.getUserPnl(userA), 500e6);
-	}
-
-	function test_rollingWindow_depositFallsOutAfter14Days() public {
-		_setCaps(2000e6, 0, 0, 0);
-
-		vm.prank(machine);
-		contest.depositFor(userA, address(usdc), 1000e6);
+		contest.depositFor(userA, address(usdc), 1_000_000e6);
 
 		vm.warp(block.timestamp + 14 days);
+
+		// Deposit inflow expired — drain now counts as full PNL
 		vm.prank(machine);
-		contest.drain(userA, address(usdc), 1000e6);
+		contest.drain(userA, address(usdc), 1_000_000e6);
 
-		assertEq(contest.getUserPnl(userA), 1000e6);
-	}
-
-	// ─── Both Caps Together ───
-
-	function test_drain_bothCapsWhicheverHitsFirst() public {
-		_setCaps(500e6, 100, 0, 0);
-
-		vm.prank(machine);
-		contest.drain(userA, address(usdc), 500e6);
-
-		vm.prank(machine);
-		vm.expectRevert(HotContest.PnlAmountExceeded.selector);
-		contest.drain(userA, address(usdc), 1e6);
-	}
-
-	function test_drain_bpsCapsHitsBeforeAmount() public {
-		_setCaps(500_000e6, 1, 0, 0);
-
-		vm.prank(machine);
-		contest.drain(userA, address(usdc), 1000e6);
-
-		vm.prank(machine);
-		vm.expectRevert(HotContest.PnlBpsExceeded.selector);
-		contest.drain(userA, address(usdc), 1e6);
+		assertEq(contest.getGlobalPnl(), 1_000_000e6);
 	}
 
 	// ─── No Caps = Unlimited ───
@@ -591,7 +801,12 @@ contract GasBenchmark is Test {
 		usdc.mint(userA, 1_000_000e6);
 		vm.prank(userA);
 		usdc.approve(address(contest), type(uint256).max);
-		usdc.mint(address(contest), 10_000_000e6);
+
+		usdc.mint(owner, 10_000_000e6);
+		vm.startPrank(owner);
+		usdc.approve(address(contest), type(uint256).max);
+		contest.deposit(10_000_000e6);
+		vm.stopPrank();
 	}
 
 	function test_gas_depositFor_noCaps() public {
@@ -606,9 +821,7 @@ contract GasBenchmark is Test {
 
 	function test_gas_drain_allCaps() public {
 		vm.prank(owner);
-		contest.setMaxPnlAmount(500_000e6);
-		vm.prank(owner);
-		contest.updateBpsCaps(HotContest.BpsCaps(200, 1000, 500));
+		contest.updateBpsCaps(HotContest.BpsCaps(1000, 200, 500));
 
 		vm.prank(machine);
 		contest.depositFor(userA, address(usdc), 100e6);
@@ -619,9 +832,7 @@ contract GasBenchmark is Test {
 
 	function test_gas_drain_allCaps_warm() public {
 		vm.prank(owner);
-		contest.setMaxPnlAmount(500_000e6);
-		vm.prank(owner);
-		contest.updateBpsCaps(HotContest.BpsCaps(200, 1000, 500));
+		contest.updateBpsCaps(HotContest.BpsCaps(1000, 200, 500));
 
 		vm.prank(machine);
 		contest.depositFor(userA, address(usdc), 100e6);
