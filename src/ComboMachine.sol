@@ -913,8 +913,13 @@ contract ComboMachine is Initializable, Pausable {
 		uint128 fee = (bet.bet_size * cancel_fee_bps) / 10000;
 		uint128 refund = bet.bet_size - fee;
 
-		// Fee stays in treasury, only refund the net amount
+		// Refund the net amount to the bettor
 		_withdrawBetFunds(bet.owner, refund, bet.token_type);
+
+		// For credit bets, burn the fee — credit tokens cannot stay idle in treasury
+		if (bet.token_type == 1 && fee > 0) {
+			IHotContest(hot_treasury_address).burnCredit(fee);
+		}
 
 		emit BetCanceledByUser(bet.owner, bet_id, refund, fee, cancel_fee_bps);
 	}
