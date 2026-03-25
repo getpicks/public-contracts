@@ -10,7 +10,7 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {Initializable} from "@openzeppelin/contracts/proxy/utils/Initializable.sol";
 import {IEventMarketRegistry} from "./IEventMarketRegistry.sol";
 
-interface IHotTreasury {
+interface IHotContest {
 	function CREDIT_TOKEN_ADDRESS() external view returns (address);
 
 	function drain(address to, uint256 amount) external;
@@ -364,7 +364,7 @@ contract FlexComboMachine is Initializable, Pausable {
 		if (_hot_treasury_address == address(0)) revert InvalidInput();
 		if (IERC20Metadata(_credit_token_address).decimals() != INTERNAL_DECIMALS)
 			revert InvalidInput();
-		if (IHotTreasury(_hot_treasury_address).CREDIT_TOKEN_ADDRESS() != _credit_token_address)
+		if (IHotContest(_hot_treasury_address).CREDIT_TOKEN_ADDRESS() != _credit_token_address)
 			revert InvalidInput();
 	}
 
@@ -472,7 +472,7 @@ contract FlexComboMachine is Initializable, Pausable {
 			uint256 converted_back = _coinAmountToBetSizeWithDecimals(coin_amount, coin_cfg.decimals);
 			if (converted_back != params.bet_size) revert BetSizePrecisionLoss();
 
-			IHotTreasury(hot_treasury_address).depositFor(
+			IHotContest(hot_treasury_address).depositFor(
 				params.bet_owner,
 				coin_cfg.token_address,
 				coin_amount
@@ -480,7 +480,7 @@ contract FlexComboMachine is Initializable, Pausable {
 		} else {
 			// Credit token: already in 18 decimals, no conversion needed
 			if (params.bet_size == 0) revert InvalidBetSize();
-			IHotTreasury(hot_treasury_address).depositFor(
+			IHotContest(hot_treasury_address).depositFor(
 				params.bet_owner,
 				credit_token_address,
 				params.bet_size
@@ -655,14 +655,8 @@ contract FlexComboMachine is Initializable, Pausable {
 	/// @param token_type Token type (0 = regular, 1 = credit)
 	function _withdrawBetFunds(address wallet_address, uint128 bet_size, uint8 token_type) internal {
 		// Convert to coin decimals — drains are always in real token
-		uint256 amount_in_coin_decimals;
-		if (token_type == 0) {
-			amount_in_coin_decimals = _betSizeToCoinAmountWithDecimals(bet_size, coin_config.decimals);
-		} else {
-			// Credit bets: convert from 18 decimals to coin decimals
-			amount_in_coin_decimals = _betSizeToCoinAmountWithDecimals(bet_size, coin_config.decimals);
-		}
-		IHotTreasury(hot_treasury_address).drain(wallet_address, amount_in_coin_decimals);
+		uint256 amount_in_coin_decimals = _betSizeToCoinAmountWithDecimals(bet_size, coin_config.decimals);
+		IHotContest(hot_treasury_address).drain(wallet_address, amount_in_coin_decimals);
 	}
 
 	/// @notice Settles a bet after all its event markets have been resolved
@@ -764,7 +758,7 @@ contract FlexComboMachine is Initializable, Pausable {
 		// Credit tokens always have 18 decimals, same as bet_size, so no conversion needed
 		if (bet.token_type == 1) {
 			// Burn credit tokens directly from treasury
-			IHotTreasury(hot_treasury_address).burnCredit(bet.bet_size);
+			IHotContest(hot_treasury_address).burnCredit(bet.bet_size);
 		}
 
 		uint256 payout = 0;
@@ -799,7 +793,7 @@ contract FlexComboMachine is Initializable, Pausable {
 		// NOTE: Payouts are ALWAYS in regular tokens, regardless of token_type used for bet
 		if (payout > 0) {
 			uint256 payout_in_coin_decimals = _betSizeToCoinAmountWithDecimals(payout, coin_cfg.decimals);
-			IHotTreasury(hot_treasury_address).drain(bet.owner, payout_in_coin_decimals);
+			IHotContest(hot_treasury_address).drain(bet.owner, payout_in_coin_decimals);
 		}
 
 		emit BetSettled(bet.owner, bet_id, payout > 0, payout);

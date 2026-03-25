@@ -41,7 +41,7 @@ contract MockCreditToken is ERC20 {
 
 // ─── Mock Treasury ───
 
-contract MockHotTreasury {
+contract MockHotContest {
 	address public immutable CREDIT_TOKEN_ADDRESS;
 	address public immutable COIN_ADDRESS;
 
@@ -72,7 +72,7 @@ contract ComboMachineTest is Test {
 	EventMarketRegistry public registry;
 	MockUSDC public usdc;
 	MockCreditToken public creditToken;
-	MockHotTreasury public treasury;
+	MockHotContest public treasury;
 
 	address public contractOwner = makeAddr("owner");
 	address public complianceOfficer = makeAddr("compliance");
@@ -99,7 +99,7 @@ contract ComboMachineTest is Test {
 		// Deploy tokens
 		usdc = new MockUSDC();
 		creditToken = new MockCreditToken();
-		treasury = new MockHotTreasury(address(creditToken), address(usdc));
+		treasury = new MockHotContest(address(creditToken), address(usdc));
 
 		// Deploy registry via proxy
 		EventMarketRegistry regImpl = new EventMarketRegistry();
