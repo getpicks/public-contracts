@@ -130,19 +130,25 @@ contract HotContest is Ownable {
 		emit Deposited(msg.sender, user, token, amount);
 	}
 
-	/// @notice Drains real token funds from treasury to a user, with PNL and daily drain checks
-	/// @dev Only drains COIN_ADDRESS. Credit token payouts are not supported — use burnCredit instead.
+	/// @notice Drains funds from treasury to a user
+	/// @dev Accepts COIN_ADDRESS or CREDIT_TOKEN_ADDRESS. Credits are treated as real money —
+	///      all PNL and daily drain caps apply. Credit amounts are converted to coin-equivalent for checks.
 	/// @param to Address to send funds to
-	/// @param amount Amount to drain (in coin decimals)
-	function drain(address to, uint256 amount) external onlyWhitelisted {
+	/// @param token Token to drain (must be COIN_ADDRESS or CREDIT_TOKEN_ADDRESS)
+	/// @param amount Amount to drain (coin decimals for COIN, 18 decimals for credit)
+	function drain(address to, address token, uint256 amount) external onlyWhitelisted {
 		if (to == address(0)) revert InvalidInput();
 		if (amount == 0) revert InvalidInput();
+		if (token != COIN_ADDRESS && token != CREDIT_TOKEN_ADDRESS) revert InvalidToken();
+
+		// Convert to coin-equivalent for PNL tracking and cap checks
+		uint256 pnl_amount = token == CREDIT_TOKEN_ADDRESS ? _creditToCoin(amount) : amount;
 
 		uint256 balance = IERC20(COIN_ADDRESS).balanceOf(address(this));
 		uint256 today = block.timestamp / DAY_DURATION;
 
 		// --- Per-user PNL check (14-day rolling window) ---
-		uint256 window_out = _windowSum(user_outflows[to]) + amount;
+		uint256 window_out = _windowSum(user_outflows[to]) + pnl_amount;
 		uint256 window_in = _windowSum(user_inflows[to]);
 		uint256 pnl = window_out > window_in ? window_out - window_in : 0;
 
@@ -160,18 +166,17 @@ contract HotContest is Ownable {
 		// --- Global daily drain check ---
 		if (c.max_daily_drain_bps > 0) {
 			DayBucket storage gd = global_daily_drain;
-			uint256 today_drain = (gd.day_index == today ? gd.amount : 0) + amount;
+			uint256 today_drain = (gd.day_index == today ? gd.amount : 0) + pnl_amount;
 			uint256 daily_limit = balance * c.max_daily_drain_bps / BPS_DENOMINATOR;
 			if (today_drain > daily_limit) revert DailyDrainExceeded();
 			gd.amount = today_drain;
 			gd.day_index = today;
 		}
 
-		// --- Record outflow ---
-		_recordBucket(user_outflows[to], today, amount);
+		// --- Record outflow and transfer ---
+		_recordBucket(user_outflows[to], today, pnl_amount);
+		IERC20(token).safeTransfer(to, amount);
 
-		// --- Transfer ---
-		IERC20(COIN_ADDRESS).safeTransfer(to, amount);
 		emit FundsDrained(msg.sender, to, amount);
 	}
 

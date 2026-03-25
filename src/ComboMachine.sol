@@ -13,7 +13,7 @@ import {IEventMarketRegistry} from "./IEventMarketRegistry.sol";
 interface IHotContest {
 	function CREDIT_TOKEN_ADDRESS() external view returns (address);
 
-	function drain(address to, uint256 amount) external;
+	function drain(address to, address token, uint256 amount) external;
 
 	function burnCredit(uint256 amount) external;
 
@@ -662,14 +662,19 @@ contract ComboMachine is Initializable, Pausable {
 	}
 
 	/// @notice Internal function to withdraw/refund bet funds to the bettor
-	/// @dev Drains tokens from treasury to the wallet address
+	/// @dev For real token bets, drains USDC from treasury. For credit bets, returns credit tokens.
 	/// @param wallet_address Address to send the funds to
-	/// @param bet_size Amount to refund in internal decimals
-	/// @param token_type Token type (0 = regular, 1 = credit)
+	/// @param bet_size Amount to refund in internal decimals (18 dec)
+	/// @param token_type Token type (0 = real token, 1 = credit)
 	function _withdrawBetFunds(address wallet_address, uint128 bet_size, uint8 token_type) internal {
-		// Convert to coin decimals — drains are always in real token
-		uint256 amount_in_coin_decimals = _betSizeToCoinAmountWithDecimals(bet_size, coin_config.decimals);
-		IHotContest(hot_treasury_address).drain(wallet_address, amount_in_coin_decimals);
+		if (token_type == 0) {
+			CoinConfig storage coin_cfg = coin_config;
+			uint256 amount_in_coin_decimals = _betSizeToCoinAmountWithDecimals(bet_size, coin_cfg.decimals);
+			IHotContest(hot_treasury_address).drain(wallet_address, coin_cfg.token_address, amount_in_coin_decimals);
+		} else {
+			// Credit bets: return credit tokens directly (bet_size is already in 18 decimals)
+			IHotContest(hot_treasury_address).drain(wallet_address, credit_token_address, bet_size);
+		}
 	}
 
 	/// @notice Settles a bet after all its event markets have been resolved
@@ -796,7 +801,7 @@ contract ComboMachine is Initializable, Pausable {
 			// Convert to coin decimals and drain regular tokens from treasury to the winner
 			// NOTE: Payouts are ALWAYS in regular tokens, regardless of token_type used for bet
 			uint256 payout_in_coin_decimals = _betSizeToCoinAmountWithDecimals(payout, coin_cfg.decimals);
-			IHotContest(hot_treasury_address).drain(bet.owner, payout_in_coin_decimals);
+			IHotContest(hot_treasury_address).drain(bet.owner, coin_cfg.token_address, payout_in_coin_decimals);
 		}
 
 		emit BetSettled(bet.owner, bet_id, all_non_voided_picks_won, payout);

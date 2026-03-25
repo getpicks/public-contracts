@@ -54,8 +54,8 @@ contract MockHotContest {
 		ERC20(token).transferFrom(user, address(this), amount);
 	}
 
-	function drain(address to, uint256 amount) external {
-		ERC20(COIN_ADDRESS).transfer(to, amount);
+	function drain(address to, address token, uint256 amount) external {
+		ERC20(token).transfer(to, amount);
 	}
 
 	function burnCredit(uint256 amount) external {

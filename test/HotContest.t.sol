@@ -157,20 +157,20 @@ contract HotContestTest is Test {
 
 	function test_drain() public {
 		vm.prank(machine);
-		contest.drain(userA, 100e6);
+		contest.drain(userA, address(usdc), 100e6);
 		assertEq(usdc.balanceOf(userA), 1_000_100e6);
 	}
 
 	function test_drain_revertsUnauthorized() public {
 		vm.prank(stranger);
 		vm.expectRevert(HotContest.Unauthorized.selector);
-		contest.drain(userA, 100e6);
+		contest.drain(userA, address(usdc), 100e6);
 	}
 
 	function test_drain_revertsZeroAmount() public {
 		vm.prank(machine);
 		vm.expectRevert(HotContest.InvalidInput.selector);
-		contest.drain(userA, 0);
+		contest.drain(userA, address(usdc), 0);
 	}
 
 	// ─── PNL Amount Cap ───
@@ -182,27 +182,27 @@ contract HotContestTest is Test {
 		contest.depositFor(userA, address(usdc), 100e6);
 
 		vm.prank(machine);
-		contest.drain(userA, 600e6);
+		contest.drain(userA, address(usdc), 600e6);
 
 		vm.prank(machine);
 		vm.expectRevert(HotContest.PnlAmountExceeded.selector);
-		contest.drain(userA, 1e6);
+		contest.drain(userA, address(usdc), 1e6);
 	}
 
 	function test_drain_pnlResetsAfterWindow() public {
 		_setCaps(500e6, 0, 0, 0);
 
 		vm.prank(machine);
-		contest.drain(userA, 500e6);
+		contest.drain(userA, address(usdc), 500e6);
 
 		vm.prank(machine);
 		vm.expectRevert(HotContest.PnlAmountExceeded.selector);
-		contest.drain(userA, 1e6);
+		contest.drain(userA, address(usdc), 1e6);
 
 		vm.warp(block.timestamp + 14 days);
 
 		vm.prank(machine);
-		contest.drain(userA, 500e6);
+		contest.drain(userA, address(usdc), 500e6);
 	}
 
 	function test_drain_depositsReducePnl() public {
@@ -212,7 +212,7 @@ contract HotContestTest is Test {
 		contest.depositFor(userA, address(usdc), 1000e6);
 
 		vm.prank(machine);
-		contest.drain(userA, 1500e6);
+		contest.drain(userA, address(usdc), 1500e6);
 
 		assertEq(contest.getUserPnl(userA), 500e6);
 	}
@@ -228,7 +228,7 @@ contract HotContestTest is Test {
 		contest.depositFor(userA, address(creditToken), 1000e18);
 
 		vm.prank(machine);
-		contest.drain(userA, 1500e6);
+		contest.drain(userA, address(usdc), 1500e6);
 
 		assertEq(contest.getUserPnl(userA), 500e6);
 	}
@@ -239,11 +239,11 @@ contract HotContestTest is Test {
 		_setCaps(0, 200, 0, 0); // 2%
 
 		vm.prank(machine);
-		contest.drain(userA, 200_000e6);
+		contest.drain(userA, address(usdc), 200_000e6);
 
 		vm.prank(machine);
 		vm.expectRevert(HotContest.PnlBpsExceeded.selector);
-		contest.drain(userA, 1e6);
+		contest.drain(userA, address(usdc), 1e6);
 	}
 
 	// ─── Global Daily Drain Cap ───
@@ -252,37 +252,37 @@ contract HotContestTest is Test {
 		_setCaps(0, 0, 1000, 0); // 10%
 
 		vm.prank(machine);
-		contest.drain(userA, 1_000_000e6);
+		contest.drain(userA, address(usdc), 1_000_000e6);
 
 		vm.prank(machine);
 		vm.expectRevert(HotContest.DailyDrainExceeded.selector);
-		contest.drain(userB, 1e6);
+		contest.drain(userB, address(usdc), 1e6);
 	}
 
 	function test_drain_dailyDrainResetsNextDay() public {
 		_setCaps(0, 0, 1000, 0); // 10%
 
 		vm.prank(machine);
-		contest.drain(userA, 1_000_000e6);
+		contest.drain(userA, address(usdc), 1_000_000e6);
 
 		vm.warp(block.timestamp + 1 days);
 
 		vm.prank(machine);
-		contest.drain(userA, 900_000e6);
+		contest.drain(userA, address(usdc), 900_000e6);
 	}
 
 	function test_drain_dailyDrainAcrossMultipleUsers() public {
 		_setCaps(0, 0, 1000, 0); // 10%
 
 		vm.prank(machine);
-		contest.drain(userA, 500_000e6);
+		contest.drain(userA, address(usdc), 500_000e6);
 
 		vm.prank(machine);
-		contest.drain(userB, 450_000e6);
+		contest.drain(userB, address(usdc), 450_000e6);
 
 		vm.prank(machine);
 		vm.expectRevert(HotContest.DailyDrainExceeded.selector);
-		contest.drain(userB, 1e6);
+		contest.drain(userB, address(usdc), 1e6);
 	}
 
 	// ─── Admin Withdrawal Limit ───
@@ -337,17 +337,17 @@ contract HotContestTest is Test {
 		_setCaps(500e6, 0, 0, 0);
 
 		vm.prank(machine);
-		contest.drain(userA, 500e6);
+		contest.drain(userA, address(usdc), 500e6);
 
 		vm.prank(machine);
 		vm.expectRevert(HotContest.PnlAmountExceeded.selector);
-		contest.drain(userA, 100e6);
+		contest.drain(userA, address(usdc), 100e6);
 
 		vm.prank(owner);
 		contest.adminCreditPnl(userA, 200e6);
 
 		vm.prank(machine);
-		contest.drain(userA, 200e6);
+		contest.drain(userA, address(usdc), 200e6);
 
 		assertEq(contest.getUserPnl(userA), 500e6);
 	}
@@ -408,7 +408,7 @@ contract HotContestTest is Test {
 		contest.depositFor(userA, address(usdc), 100e6);
 
 		vm.prank(machine);
-		contest.drain(userA, 300e6);
+		contest.drain(userA, address(usdc), 300e6);
 
 		assertEq(contest.getUserPnl(userA), 200e6);
 	}
@@ -418,7 +418,7 @@ contract HotContestTest is Test {
 		contest.depositFor(userA, address(usdc), 500e6);
 
 		vm.prank(machine);
-		contest.drain(userA, 100e6);
+		contest.drain(userA, address(usdc), 100e6);
 
 		assertEq(contest.getUserPnl(userA), 0);
 	}
@@ -427,7 +427,7 @@ contract HotContestTest is Test {
 		_setCaps(0, 0, 5000, 0);
 
 		vm.prank(machine);
-		contest.drain(userA, 100e6);
+		contest.drain(userA, address(usdc), 100e6);
 
 		assertEq(contest.getGlobalDailyDrain(), 100e6);
 	}
@@ -466,12 +466,12 @@ contract HotContestTest is Test {
 		_setCaps(2000e6, 0, 0, 0);
 
 		vm.prank(machine);
-		contest.drain(userA, 200e6);
+		contest.drain(userA, address(usdc), 200e6);
 		assertEq(contest.getUserPnl(userA), 200e6);
 
 		vm.warp(block.timestamp + 5 days);
 		vm.prank(machine);
-		contest.drain(userA, 300e6);
+		contest.drain(userA, address(usdc), 300e6);
 		assertEq(contest.getUserPnl(userA), 500e6);
 
 		vm.warp(block.timestamp + 9 days);
@@ -489,7 +489,7 @@ contract HotContestTest is Test {
 
 		vm.warp(block.timestamp + 8 days);
 		vm.prank(machine);
-		contest.drain(userA, 1000e6);
+		contest.drain(userA, address(usdc), 1000e6);
 
 		assertEq(contest.getUserPnl(userA), 0);
 	}
@@ -502,7 +502,7 @@ contract HotContestTest is Test {
 
 		vm.warp(block.timestamp + 13 days);
 		vm.prank(machine);
-		contest.drain(userA, 1500e6);
+		contest.drain(userA, address(usdc), 1500e6);
 
 		assertEq(contest.getUserPnl(userA), 500e6);
 	}
@@ -515,7 +515,7 @@ contract HotContestTest is Test {
 
 		vm.warp(block.timestamp + 14 days);
 		vm.prank(machine);
-		contest.drain(userA, 1000e6);
+		contest.drain(userA, address(usdc), 1000e6);
 
 		assertEq(contest.getUserPnl(userA), 1000e6);
 	}
@@ -526,29 +526,29 @@ contract HotContestTest is Test {
 		_setCaps(500e6, 100, 0, 0);
 
 		vm.prank(machine);
-		contest.drain(userA, 500e6);
+		contest.drain(userA, address(usdc), 500e6);
 
 		vm.prank(machine);
 		vm.expectRevert(HotContest.PnlAmountExceeded.selector);
-		contest.drain(userA, 1e6);
+		contest.drain(userA, address(usdc), 1e6);
 	}
 
 	function test_drain_bpsCapsHitsBeforeAmount() public {
 		_setCaps(500_000e6, 1, 0, 0);
 
 		vm.prank(machine);
-		contest.drain(userA, 1000e6);
+		contest.drain(userA, address(usdc), 1000e6);
 
 		vm.prank(machine);
 		vm.expectRevert(HotContest.PnlBpsExceeded.selector);
-		contest.drain(userA, 1e6);
+		contest.drain(userA, address(usdc), 1e6);
 	}
 
 	// ─── No Caps = Unlimited ───
 
 	function test_drain_noCapsAllowsUnlimited() public {
 		vm.prank(machine);
-		contest.drain(userA, 5_000_000e6);
+		contest.drain(userA, address(usdc), 5_000_000e6);
 		assertEq(usdc.balanceOf(userA), 6_000_000e6);
 	}
 
@@ -601,7 +601,7 @@ contract GasBenchmark is Test {
 
 	function test_gas_drain_noCaps() public {
 		vm.prank(machine);
-		contest.drain(userA, 100e6);
+		contest.drain(userA, address(usdc), 100e6);
 	}
 
 	function test_gas_drain_allCaps() public {
@@ -614,7 +614,7 @@ contract GasBenchmark is Test {
 		contest.depositFor(userA, address(usdc), 100e6);
 
 		vm.prank(machine);
-		contest.drain(userA, 200e6);
+		contest.drain(userA, address(usdc), 200e6);
 	}
 
 	function test_gas_drain_allCaps_warm() public {
@@ -627,8 +627,8 @@ contract GasBenchmark is Test {
 		contest.depositFor(userA, address(usdc), 100e6);
 
 		vm.startPrank(machine);
-		contest.drain(userA, 50e6);
-		contest.drain(userA, 50e6);
+		contest.drain(userA, address(usdc), 50e6);
+		contest.drain(userA, address(usdc), 50e6);
 		vm.stopPrank();
 	}
 }
