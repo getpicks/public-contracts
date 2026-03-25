@@ -14,12 +14,16 @@ import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/Messa
 /// @dev Signature System:
 ///      - distribute/batchDistribute: Requires distributor signature with parameters
 ///      - Nonce is read from storage and used in signature verification
-///      - Message format: keccak256(abi.encode(chainid, contract_address, recipient(s), amount(s), idempotency_key(s), nonce))
+///      - Message format for single: keccak256(abi.encode(DISTRIBUTE_TYPEHASH, chainid, contract_address, recipient, amount, idempotency_key, nonce))
+///      - Message format for batch: keccak256(abi.encode(BATCH_DISTRIBUTE_TYPEHASH, chainid, contract_address, recipients, amounts, idempotency_keys, nonce))
 ///      - Distributor nonce increments with each distribution to prevent replay attacks
 contract CreditTokenVault is Ownable {
 	using SafeERC20 for IERC20;
 	using ECDSA for bytes32;
 	using MessageHashUtils for bytes32;
+
+	bytes32 internal constant DISTRIBUTE_TYPEHASH = keccak256("distribute");
+	bytes32 internal constant BATCH_DISTRIBUTE_TYPEHASH = keccak256("batchDistribute");
 
 	IERC20 public immutable CREDIT_TOKEN;
 
@@ -127,7 +131,7 @@ contract CreditTokenVault is Ownable {
 		uint256 nonce = distributor_nonce;
 
 		bytes32 message_hash = keccak256(
-			abi.encode(block.chainid, address(this), recipient, amount, idempotency_key, nonce)
+			abi.encode(DISTRIBUTE_TYPEHASH, block.chainid, address(this), recipient, amount, idempotency_key, nonce)
 		);
 		bytes32 eth_signed_message_hash = message_hash.toEthSignedMessageHash();
 		address signer = eth_signed_message_hash.recover(distributor_signature);
@@ -171,7 +175,7 @@ contract CreditTokenVault is Ownable {
 		bytes calldata distributor_signature
 	) internal view {
 		bytes32 message_hash = keccak256(
-			abi.encode(block.chainid, address(this), recipients, amounts, idempotency_keys, nonce)
+			abi.encode(BATCH_DISTRIBUTE_TYPEHASH, block.chainid, address(this), recipients, amounts, idempotency_keys, nonce)
 		);
 		bytes32 eth_signed_message_hash = message_hash.toEthSignedMessageHash();
 		address signer = eth_signed_message_hash.recover(distributor_signature);
