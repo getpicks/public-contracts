@@ -76,6 +76,7 @@ contract FlexComboMachine is Initializable, Pausable {
 
 	/// @dev Internal decimals used for all bet amounts and calculations
 	uint8 internal constant INTERNAL_DECIMALS = 18;
+	uint16 internal constant BPS_DENOMINATOR = 10_000;
 
 	struct MultiplierConfig {
 		bool is_active;
@@ -1035,6 +1036,7 @@ contract FlexComboMachine is Initializable, Pausable {
 
 		// Update cancel fee if provided (type(uint16).max = skip)
 		if (new_cancel_fee_bps != type(uint16).max) {
+			if (new_cancel_fee_bps > BPS_DENOMINATOR) revert InvalidInput();
 			cancel_fee_bps = new_cancel_fee_bps;
 		}
 
