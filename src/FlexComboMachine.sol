@@ -950,7 +950,10 @@ contract FlexComboMachine is Initializable, Pausable {
 			if (bet.status != STATUS_ACTIVE && bet.status != STATUS_FROZEN) revert BetNotActive();
 
 			bet.status = STATUS_SEIZED;
-			// Seized funds stay in treasury, no withdrawal needed
+			// For credit bets, burn the seized tokens — credit tokens must not sit idle in treasury
+			if (bet.token_type == 1) {
+				IHotContest(hot_treasury_address).burnCredit(bet.bet_size);
+			}
 			emit BetSeized(bet.owner, bet_id);
 		} else {
 			revert InvalidStatus();
