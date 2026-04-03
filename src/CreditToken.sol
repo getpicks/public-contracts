@@ -21,6 +21,7 @@ contract CreditToken is ERC20, Ownable, ICreditToken {
 
 	error Unauthorized();
 	error InvalidAddress();
+	error NotSupported();
 
 	constructor(address _owner) ERC20("Credit Token", "CREDIT") Ownable(_owner) {}
 
@@ -65,6 +66,12 @@ contract CreditToken is ERC20, Ownable, ICreditToken {
 		if (from == address(0)) revert InvalidAddress();
 		_burn(from, amount);
 		emit MasterBurn(from, amount);
+	}
+
+	/// @notice Disabled — this token does not use the standard ERC20 approval model
+	/// @dev Whitelisted addresses have implicit permanent approval via the whitelist
+	function approve(address, uint256) public pure override returns (bool) {
+		revert NotSupported();
 	}
 
 	/// @notice Override allowance to provide permanent approval to whitelisted addresses
