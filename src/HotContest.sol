@@ -518,7 +518,6 @@ contract HotContest is Ownable {
 		uint256 today = block.timestamp / DAY_DURATION;
 		uint256 total = 0;
 		for (uint256 i = 0; i < WINDOW_DAYS; ++i) {
-			if (today < i) break;
 			uint256 target_day = today - i;
 			uint256 slot = target_day % WINDOW_DAYS;
 			if (buckets[slot].day_index == target_day) {
