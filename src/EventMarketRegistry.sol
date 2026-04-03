@@ -247,6 +247,8 @@ contract EventMarketRegistry is IEventMarketRegistry, Initializable, Pausable {
 		automated_authority_nonce = automated_authority_nonce + 1;
 		emit AutomatedAuthorityNonceIncremented(old_nonce, automated_authority_nonce);
 
+		if (new_min_settlement_ts <= block.timestamp) revert InvalidInput();
+
 		event_markets[event_market_id].min_settlement_ts = new_min_settlement_ts;
 
 		emit EventMarketUpdated(event_market_id, new_min_settlement_ts);

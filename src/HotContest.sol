@@ -158,6 +158,7 @@ contract HotContest is Ownable {
 	event FundsDrained(address indexed contract_address, address indexed to, uint256 amount);
 	event CreditBurned(address indexed contract_address, uint256 amount);
 	event FundsWithdrawn(address indexed to, uint256 amount);
+	event CreditWithdrawn(address indexed to, uint256 amount);
 	event ExcessCoinWithdrawn(address indexed to, uint256 amount);
 	event TokenRecovered(address indexed token, address indexed to, uint256 amount);
 	event BpsCapsUpdated(uint16 max_daily_drain_bps, uint16 max_global_pnl_bps, uint16 admin_daily_withdraw_bps);
@@ -377,6 +378,18 @@ contract HotContest is Ownable {
 		coin_balance -= amount;
 		IERC20(COIN_ADDRESS).safeTransfer(to, amount);
 		emit FundsWithdrawn(to, amount);
+	}
+
+	/// @notice Withdraws credit tokens from treasury to a given address
+	/// @dev No cap applies — credit tokens are not tracked treasury capital.
+	///      Use burnCredit() (whitelisted machines) to destroy credits instead.
+	/// @param to Address to send credit tokens to
+	/// @param amount Amount of credit tokens to withdraw (18 decimals)
+	function withdrawCredit(address to, uint256 amount) external onlyOwner {
+		if (to == address(0)) revert InvalidInput();
+		if (amount == 0) revert InvalidInput();
+		IERC20(CREDIT_TOKEN_ADDRESS).safeTransfer(to, amount);
+		emit CreditWithdrawn(to, amount);
 	}
 
 	/// @notice Sweeps USDC sent directly to the contract outside of deposit()/depositFor()
