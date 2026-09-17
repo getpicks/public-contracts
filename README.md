@@ -147,18 +147,22 @@ Losses have `owed == 0` and nothing to claim.
 
 ## Refunds and cancel
 
-All refunds are **full entry**, paid immediately from `EntryVault` (not `owed`, not `PrizeTreasury`). `reason_hash` is keccak256 of the off-chain reason key and is part of the signed payload and events.
+All refunds are **full entry**. The authority passes `amount`; the machine reverts unless it equals the full entry. Partial refunds are not allowed. `reason_hash` is keccak256 of the off-chain reason key and is part of the signed payload and events.
+
+Refunds are two-stage so a large group cannot run out of gas transferring every entry in one transaction:
+
+1. **Mark** — status `REFUNDED`, `owed = amount`, emit `LineupRefunded`. No token transfer.
+2. **Claim** — `claimRefund` / `batchClaimRefund` pulls refund `owed` from `EntryVault`. Prize wins use `claimPrize` / `batchClaimPrize` from `PrizeTreasury`.
 
 | Path | When | Signatures | Effect |
 |---|---|---|---|
 | `cancelLineup` | Still ungrouped, owner wants out | Owner + authority | Status `CANCELED`, entry returned now |
-| `refundUngrouped` | Never grouped (cutoff, commenced game, …) | Authority only | Status `REFUNDED`, entry returned now |
-| `batchRefundUngrouped` | One or many, including members of an **active** group | Authority; each item carries reveal + `market_results_hash` | Mark all `REFUNDED` first, then pay |
-| `refundGroup` | Whole locked group cannot settle safely | Authority; full roster | Remaining unpaid members refunded, group `REFUNDED` |
+| `batchRefundLineups` | One or many, ungrouped or members of an **active** group | Authority; each item carries `amount`, reveal + `market_results_hash` | Mark all `REFUNDED` + `owed`; members claim later |
+| `refundGroup` | Whole locked group cannot settle safely | Authority; full roster + per-member `amounts` (0 if already refunded) | Mark remaining members `REFUNDED` + `owed`, group `REFUNDED`; members claim later |
 
 `refundGroup` after every member is already `REFUNDED` (for example via batch) only closes the group. It does not pay twice.
 
-Cancel / ungrouped refund require `group_id == 0`. Grouped lineups use the batch or group path.
+Cancel requires `group_id == 0`. Grouped lineups use the batch or group path.
 
 ---
 
@@ -168,10 +172,11 @@ Cancel / ungrouped refund require `group_id == 0`. Grouped lineups use the batch
 Place:     owner  --approve-->  EntryVault
            machine --depositFor(owner, token, amount)--> EntryVault
 
-Cancel /
-refund:    machine --EntryVault.payout(owner, entry token, full entry)--> owner
+Cancel:    machine --EntryVault.payout(owner, entry token, full entry)--> owner
 
-Win claim: machine --PrizeTreasury.payout(owner, prize token, owed)--> owner
+Refund:    mark REFUNDED + owed, then claimRefund --EntryVault.payout(owner, entry token, owed)--> owner
+
+Win claim: claimPrize --PrizeTreasury.payout(owner, prize token, owed)--> owner
 
 Consumed
 credit:    settleGroup accrues pending_credit_recycle

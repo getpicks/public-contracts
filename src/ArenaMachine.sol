@@ -61,8 +61,7 @@ contract ArenaMachine is Initializable, Pausable {
     bytes32 internal constant BATCH_SETTLE_LINEUP_TYPEHASH = keccak256("arenaBatchSettleLineup");
     bytes32 internal constant SETTLE_GROUP_TYPEHASH = keccak256("arenaSettleGroup");
     bytes32 internal constant CANCEL_LINEUP_TYPEHASH = keccak256("arenaCancelLineup");
-    bytes32 internal constant REFUND_UNGROUPED_TYPEHASH = keccak256("arenaRefundUngrouped");
-    bytes32 internal constant BATCH_REFUND_UNGROUPED_TYPEHASH = keccak256("arenaBatchRefundUngrouped");
+    bytes32 internal constant BATCH_REFUND_LINEUPS_TYPEHASH = keccak256("arenaBatchRefundLineups");
     bytes32 internal constant REFUND_GROUP_TYPEHASH = keccak256("arenaRefundGroup");
 
     // ─── Lineup status ───
@@ -104,7 +103,7 @@ contract ArenaMachine is Initializable, Pausable {
         uint16 vault_pair_id;
         uint128 size; // internal (18) decimals
         uint32 max_multiplier; // hundredths; payout bound = entry * max_multiplier / 100. Locked at placement.
-        uint128 owed; // pull-based winner payout (destination token's own decimals)
+        uint128 owed; // pull-based prize or refund (destination token's own decimals)
         bytes32 group_id; // bytes32(0) = unassigned; off-chain-derived id once grouped
         bytes32 picks_hash;
     }
@@ -150,8 +149,9 @@ contract ArenaMachine is Initializable, Pausable {
         bytes automated_authority_signature;
     }
 
-    struct RefundUngroupedParams {
+    struct RefundLineupParams {
         uint256 lineup_id;
+        uint128 amount;
         Pick[] picks;
         bytes32 salt;
         bytes32 market_results_hash;
@@ -213,7 +213,8 @@ contract ArenaMachine is Initializable, Pausable {
     event LineupRevealed(uint256 indexed lineup_id, Pick[] picks, bytes32 salt);
     event GroupSettled(bytes32 indexed group_id);
     event MemberSettled(uint256 indexed lineup_id, address indexed owner, uint8 outcome, uint128 owed);
-    event Claimed(uint256 indexed lineup_id, address indexed owner, uint128 amount);
+    event PrizeClaimed(uint256 indexed lineup_id, address indexed owner, uint128 amount);
+    event RefundClaimed(uint256 indexed lineup_id, address indexed owner, uint128 amount);
     event ConsumedCreditRecycled(uint16 indexed vault_pair_id, uint256 amount);
     event CreditRecycleAddressUpdated(address indexed credit_recycle_address);
     event TokenTypeVaultPairUpdated(uint8 indexed token_type, uint16 indexed vault_pair_id);
@@ -621,29 +622,43 @@ contract ArenaMachine is Initializable, Pausable {
         emit MemberSettled(lineup_id, lineup.owner, outcome, lineup.owed);
     }
 
-    // ─── Claim (pull-based payout / refund) ───
+    // ─── Claim (pull-based prize / refund) ───
 
-    function claim(uint256 lineup_id) public whenNotPaused {
-        Lineup storage lineup = lineups[_requireLineup(lineup_id)];
-        uint128 amount = lineup.owed;
+    function _takeOwed(Lineup storage lineup) internal returns (uint128 amount) {
+        amount = lineup.owed;
         if (amount == 0) revert NothingToClaim();
         lineup.owed = 0;
-
-        (, address prize_treasury,) = IVaultFactory(vault_factory_address).getVaultPair(lineup.vault_pair_id);
-
-        if (lineup.status == STATUS_SETTLED) {
-            address token = _isCreditPrize(lineup.token_type) ? credit_token_address : coin_config.token_address;
-            IPrizeTreasury(prize_treasury).payout(lineup.owner, token, amount);
-        } else {
-            revert NothingToClaim();
-        }
-
-        emit Claimed(lineup_id, lineup.owner, amount);
     }
 
-    function batchClaim(uint256[] calldata lineup_ids) external {
+    function claimPrize(uint256 lineup_id) public whenNotPaused {
+        Lineup storage lineup = lineups[_requireLineup(lineup_id)];
+        if (lineup.status != STATUS_SETTLED) revert NothingToClaim();
+        uint128 amount = _takeOwed(lineup);
+        (, address prize_treasury,) = IVaultFactory(vault_factory_address).getVaultPair(lineup.vault_pair_id);
+        address token = _isCreditPrize(lineup.token_type) ? credit_token_address : coin_config.token_address;
+        IPrizeTreasury(prize_treasury).payout(lineup.owner, token, amount);
+        emit PrizeClaimed(lineup_id, lineup.owner, amount);
+    }
+
+    function claimRefund(uint256 lineup_id) public whenNotPaused {
+        Lineup storage lineup = lineups[_requireLineup(lineup_id)];
+        if (lineup.status != STATUS_REFUNDED) revert NothingToClaim();
+        uint128 amount = _takeOwed(lineup);
+        (address entry_vault,,) = IVaultFactory(vault_factory_address).getVaultPair(lineup.vault_pair_id);
+        address token = _isCreditEntry(lineup.token_type) ? credit_token_address : coin_config.token_address;
+        IEntryVault(entry_vault).payout(lineup.owner, token, amount);
+        emit RefundClaimed(lineup_id, lineup.owner, amount);
+    }
+
+    function batchClaimPrize(uint256[] calldata lineup_ids) external {
         for (uint256 i = 0; i < lineup_ids.length; ++i) {
-            claim(lineup_ids[i]);
+            claimPrize(lineup_ids[i]);
+        }
+    }
+
+    function batchClaimRefund(uint256[] calldata lineup_ids) external {
+        for (uint256 i = 0; i < lineup_ids.length; ++i) {
+            claimRefund(lineup_ids[i]);
         }
     }
 
@@ -686,60 +701,41 @@ contract ArenaMachine is Initializable, Pausable {
 
     // ─── Emergency / server refunds ───
 
-    /// @notice Refunds an ungrouped lineup that could not be matched (or a contest cancelled
-    ///         before grouping). Authority-signed; no owner signature required.
-    function refundUngrouped(uint256 lineup_id, bytes32 reason_hash, uint256 deadline, bytes calldata automated_authority_signature)
-        external
-        whenNotPaused
-    {
-        if (block.timestamp > deadline) revert SignatureExpired();
-
-        bytes32 message_hash =
-            keccak256(abi.encode(REFUND_UNGROUPED_TYPEHASH, block.chainid, address(this), lineup_id, reason_hash, deadline));
-        if (message_hash.toEthSignedMessageHash().recover(automated_authority_signature) != automated_authority_address)
-        {
-            revert InvalidSignature();
-        }
-
-        Lineup storage lineup = lineups[_requireLineup(lineup_id)];
-        if (lineup.status != STATUS_ACTIVE) revert LineupNotActive();
-        if (lineup.group_id != bytes32(0)) revert LineupNotActive();
-
-        lineup.status = STATUS_REFUNDED;
-        _payFullRefund(lineup_id, reason_hash);
+    function _fullRefundAmount(Lineup storage lineup) internal view returns (uint128) {
+        return uint128(
+            _isCreditEntry(lineup.token_type) ? uint256(lineup.size) : _toCoinDecimals(uint256(lineup.size))
+        );
     }
 
-    function _payFullRefund(uint256 lineup_id, bytes32 reason_hash) internal {
+    function _markRefund(uint256 lineup_id, uint128 amount, bytes32 reason_hash) internal {
         if (reason_hash == bytes32(0)) revert InvalidInput();
         Lineup storage lineup = lineups[lineup_id];
-        (address entry_vault,,) = IVaultFactory(vault_factory_address).getVaultPair(lineup.vault_pair_id);
-        address token = _isCreditEntry(lineup.token_type) ? credit_token_address : coin_config.token_address;
-        uint256 amount =
-            _isCreditEntry(lineup.token_type) ? uint256(lineup.size) : _toCoinDecimals(uint256(lineup.size));
-        IEntryVault(entry_vault).payout(lineup.owner, token, amount);
+        if (amount != _fullRefundAmount(lineup)) revert InvalidInput();
+        lineup.owed = amount;
         emit LineupRefunded(lineup_id, lineup.owner, amount, reason_hash);
     }
 
-    /// @notice Atomically pays full refunds with owner-bound reveal proofs, including members of active groups.
-    /// @dev The existing batch entrypoint also accepts already-revealed members of an active group.
+    /// @notice Marks one or more lineups refunded with owner-bound reveal proofs, including members of active groups.
+    /// @dev Members claim owed refunds later. Accepts already-revealed members of an active group.
     /// @dev Hash is keccak256 of packed (bytes12 market id, bytes12 winning outcome) pairs
     ///      in pick order, omitting unsettled markets. No settled markets => keccak256("").
-    function batchRefundUngrouped(
-        RefundUngroupedParams[] calldata params,
+    function batchRefundLineups(
+        RefundLineupParams[] calldata params,
         uint256 deadline,
         bytes calldata automated_authority_signature
     ) external whenNotPaused {
         if (block.timestamp > deadline) revert SignatureExpired();
         if (params.length == 0) revert InvalidInput();
         bytes32 message_hash = keccak256(
-            abi.encode(BATCH_REFUND_UNGROUPED_TYPEHASH, block.chainid, address(this), params, deadline)
+            abi.encode(BATCH_REFUND_LINEUPS_TYPEHASH, block.chainid, address(this), params, deadline)
         );
         if (message_hash.toEthSignedMessageHash().recover(automated_authority_signature) != automated_authority_address) {
             revert InvalidSignature();
         }
-        // Validate and mark EVERY member before any external payout (batch-wide CEI).
+        // Validate and mark EVERY member before recording owed (batch-wide CEI).
+        // Payout is a later claim so a large batch cannot run out of gas transferring.
         for (uint256 i = 0; i < params.length; ++i) {
-            RefundUngroupedParams calldata param = params[i];
+            RefundLineupParams calldata param = params[i];
             Lineup storage lineup = lineups[_requireLineup(param.lineup_id)];
             _requireRefundable(lineup);
             if (param.picks.length < min_picks_count || param.picks.length > max_picks_count) revert InvalidInput();
@@ -748,7 +744,7 @@ contract ArenaMachine is Initializable, Pausable {
             lineup.status = STATUS_REFUNDED; // also rejects duplicate members
         }
         for (uint256 i = 0; i < params.length; ++i) {
-            _payFullRefund(params[i].lineup_id, params[i].reason_hash);
+            _markRefund(params[i].lineup_id, params[i].amount, params[i].reason_hash);
         }
     }
 
@@ -787,28 +783,43 @@ contract ArenaMachine is Initializable, Pausable {
     function refundGroup(
         bytes32 group_id,
         uint256[] calldata member_lineup_ids,
+        uint128[] calldata amounts,
         bytes32 reason_hash,
         uint256 deadline,
         bytes calldata automated_authority_signature
     ) external {
         if (block.timestamp > deadline) revert SignatureExpired();
         bytes32 message_hash = keccak256(
-            abi.encode(REFUND_GROUP_TYPEHASH, block.chainid, address(this), group_id, member_lineup_ids, reason_hash, deadline)
+            abi.encode(
+                REFUND_GROUP_TYPEHASH,
+                block.chainid,
+                address(this),
+                group_id,
+                member_lineup_ids,
+                amounts,
+                reason_hash,
+                deadline
+            )
         );
         if (message_hash.toEthSignedMessageHash().recover(automated_authority_signature) != automated_authority_address)
         {
             revert InvalidSignature();
         }
-        _refundGroup(group_id, member_lineup_ids, reason_hash);
+        _refundGroup(group_id, member_lineup_ids, amounts, reason_hash);
     }
 
-    function _refundGroup(bytes32 group_id, uint256[] calldata member_lineup_ids, bytes32 reason_hash) internal {
+    function _refundGroup(
+        bytes32 group_id,
+        uint256[] calldata member_lineup_ids,
+        uint128[] calldata amounts,
+        bytes32 reason_hash
+    ) internal {
         if (reason_hash == bytes32(0)) revert InvalidInput();
         Group storage group = groups[group_id];
         if (group.member_count == 0 || group.status != GROUP_STATUS_ACTIVE) revert GroupNotActive();
 
         uint256 count = member_lineup_ids.length;
-        if (count != group.member_count) revert MembersMismatch();
+        if (count != group.member_count || count != amounts.length) revert MembersMismatch();
         if (keccak256(abi.encode(member_lineup_ids)) != group.members_hash) revert MembersMismatch();
 
         bool[] memory pay_members = new bool[](count);
@@ -819,17 +830,20 @@ contract ArenaMachine is Initializable, Pausable {
                 revert MembersMismatch();
             }
             if (lineup.status == STATUS_REFUNDED) {
+                if (amounts[i] != 0) {
+                    revert InvalidInput();
+                }
                 continue;
             }
             _requireRefundable(lineup);
             lineup.status = STATUS_REFUNDED;
             pay_members[i] = true;
         }
-        // Mark the complete batch and group before external payouts.
+        // Mark the complete batch and group. Members claim owed refunds separately.
         group.status = GROUP_STATUS_REFUNDED;
         for (uint256 i = 0; i < count; ++i) {
             if (pay_members[i]) {
-                _payFullRefund(member_lineup_ids[i], reason_hash);
+                _markRefund(member_lineup_ids[i], amounts[i], reason_hash);
             }
         }
         emit GroupRefunded(group_id, reason_hash);

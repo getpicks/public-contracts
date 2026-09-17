@@ -113,7 +113,6 @@ contract ArenaMachineTest is Test {
 	bytes32 internal constant SETTLE_LINEUP_TH = keccak256("arenaSettleLineup");
 	bytes32 internal constant SETTLE_GROUP_TH = keccak256("arenaSettleGroup");
 	bytes32 internal constant CANCEL_TH = keccak256("arenaCancelLineup");
-	bytes32 internal constant REFUND_UNGROUPED_TH = keccak256("arenaRefundUngrouped");
 	bytes32 internal constant REFUND_GROUP_TH = keccak256("arenaRefundGroup");
 	bytes32 internal constant REASON_HASH = keccak256("arena-test-refund-reason-longer-than-thirty-two-bytes");
 
@@ -397,15 +396,35 @@ contract ArenaMachineTest is Test {
 		ids[3] = d;
 	}
 
+	function _refundAmount(uint256 lineup_id) internal view returns (uint128) {
+		ArenaMachine.Lineup memory lineup = arena.getLineup(lineup_id);
+		if (lineup.status == STATUS_REFUNDED) {
+			return 0;
+		}
+		return lineup.token_type == 0 ? uint128(uint256(lineup.size) / 1e12) : lineup.size;
+	}
+
+	function _groupRefundAmounts(uint256[] memory ids) internal view returns (uint128[] memory amounts) {
+		amounts = new uint128[](ids.length);
+		for (uint256 i = 0; i < ids.length; ++i) {
+			amounts[i] = _refundAmount(ids[i]);
+		}
+	}
+
 	function _signRefundGroup(bytes32 groupId, uint256[] memory ids, uint256 deadline)
 		internal
 		view
 		returns (bytes memory)
 	{
-		bytes32 h = keccak256(abi.encode(REFUND_GROUP_TH, block.chainid, address(arena), groupId, ids, REASON_HASH, deadline))
-			.toEthSignedMessageHash();
+		bytes32 h = keccak256(
+			abi.encode(REFUND_GROUP_TH, block.chainid, address(arena), groupId, ids, _groupRefundAmounts(ids), REASON_HASH, deadline)
+		).toEthSignedMessageHash();
 		(uint8 v, bytes32 r, bytes32 s) = vm.sign(authorityPk, h);
 		return abi.encodePacked(r, s, v);
+	}
+
+	function _refundGroup(bytes32 groupId, uint256[] memory ids, uint256 deadline) internal {
+		arena.refundGroup(groupId, ids, _groupRefundAmounts(ids), REASON_HASH, deadline, _signRefundGroup(groupId, ids, deadline));
 	}
 
 	function _buildCancel(uint256 lineupId, uint256 userPk)
@@ -691,14 +710,14 @@ contract ArenaMachineTest is Test {
 
 		assertEq(uint256(arena.getGroup(GROUP).status), 1); // GROUP_STATUS_SETTLED
 		assertEq(uint256(arena.getLineup(a).owed), 20e6);
-		assertEq(uint256(arena.getLineup(d).owed), 0);
+		assertEq(uint256(arena.getLineup(d).owed), 10e6);
 		assertEq(uint256(arena.getLineup(d).status), STATUS_REFUNDED);
 		assertEq(uint256(arena.getLineup(b).owed), 0);
 
-		// Refund was paid immediately; only the winner needs a claim.
-		uint256[] memory toClaim = new uint256[](1);
-		toClaim[0] = a;
-		arena.batchClaim(toClaim);
+		uint256[] memory prize_ids = new uint256[](1);
+		prize_ids[0] = a;
+		arena.batchClaimPrize(prize_ids);
+		_claim(d);
 
 		assertEq(coin.balanceOf(u1), 1010e6); // +$20 prize
 		assertEq(coin.balanceOf(u4), 1000e6); // entry refunded
@@ -706,9 +725,9 @@ contract ArenaMachineTest is Test {
 
 		// loser cannot claim, double-claim reverts
 		vm.expectRevert(ArenaMachine.NothingToClaim.selector);
-		arena.claim(b);
+		arena.claimPrize(b);
 		vm.expectRevert(ArenaMachine.NothingToClaim.selector);
-		arena.claim(a);
+		arena.claimPrize(a);
 	}
 
 	function testFuzz_settleGroupRejectsRefundOutcomes(uint8 outcome) public {
@@ -780,7 +799,7 @@ contract ArenaMachineTest is Test {
 		assertEq(credit.balanceOf(address(entry)), 10e18);
 
 		// coupon winner is paid real COIN from the prize treasury
-		arena.claim(a);
+		arena.claimPrize(a);
 		assertEq(coin.balanceOf(u1), 1000e6 + 8e6);
 
 		// daily batch recycle moves the consumed credit back to the credit vault (no burn)
@@ -815,7 +834,7 @@ contract ArenaMachineTest is Test {
 
 		assertEq(arena.pending_credit_recycle(1), 5e18);
 		assertEq(credit.balanceOf(u1), 95e18);
-		arena.claim(a);
+		arena.claimPrize(a);
 		assertEq(credit.balanceOf(u1), 110e18);
 		assertEq(credit.balanceOf(address(creditPrize)), 500_000e18 - 15e18);
 
@@ -847,16 +866,16 @@ contract ArenaMachineTest is Test {
 	// ─── refund paths ───
 
 	function test_batchRefund_bindsReasonAndRejectsEmptyReason() public {
-		ArenaMachine.RefundUngroupedParams[] memory params = _refundBatch(TOKEN_COIN);
+		ArenaMachine.RefundLineupParams[] memory params = _refundBatch(TOKEN_COIN);
 		uint256 deadline = block.timestamp + 100;
 		bytes memory signature = _signRefundBatch(params, deadline, block.chainid, address(arena));
 		params[0].reason_hash = keccak256("changed-reason");
 		vm.expectRevert(ArenaMachine.InvalidSignature.selector);
-		arena.batchRefundUngrouped(params, deadline, signature);
+		arena.batchRefundLineups(params, deadline, signature);
 		params[0].reason_hash = bytes32(0);
 		signature = _signRefundBatch(params, deadline, block.chainid, address(arena));
 		vm.expectRevert(ArenaMachine.InvalidInput.selector);
-		arena.batchRefundUngrouped(params, deadline, signature);
+		arena.batchRefundLineups(params, deadline, signature);
 		assertEq(arena.getLineup(params[0].lineup_id).status, 0);
 	}
 
@@ -869,20 +888,27 @@ contract ArenaMachineTest is Test {
 		_assign(GROUP, ids);
 		uint256 deadline = block.timestamp + 1 hours;
 
+		uint128[] memory amounts = _groupRefundAmounts(ids);
+		bytes memory signature = _signRefundGroup(GROUP, ids, deadline);
 		vm.expectRevert(ArenaMachine.InvalidSignature.selector);
-		arena.refundGroup(GROUP, ids, keccak256("changed-reason"), deadline, _signRefundGroup(GROUP, ids, deadline));
+		arena.refundGroup(GROUP, ids, amounts, keccak256("changed-reason"), deadline, signature);
 		vm.expectEmit(true, true, false, true, address(arena));
 		emit ArenaMachine.LineupRefunded(a, u1, 10e6, REASON_HASH);
 		vm.expectEmit(true, true, false, true, address(arena));
 		emit ArenaMachine.LineupRefunded(b, u2, 10e6, REASON_HASH);
 		vm.expectEmit(true, false, false, true, address(arena));
 		emit ArenaMachine.GroupRefunded(GROUP, REASON_HASH);
-		arena.refundGroup(GROUP, ids, REASON_HASH, deadline, _signRefundGroup(GROUP, ids, deadline));
+		_refundGroup(GROUP, ids, deadline);
 
 		assertEq(uint256(arena.getGroup(GROUP).status), 2); // GROUP_STATUS_REFUNDED
 		assertEq(uint256(arena.getLineup(a).status), STATUS_REFUNDED);
+		assertEq(uint256(arena.getLineup(a).owed), 10e6);
+		assertEq(coin.balanceOf(u1), 990e6);
+		_claim(a);
+		_claim(b);
 		assertEq(uint256(arena.getLineup(a).owed), 0);
 		assertEq(coin.balanceOf(u1), 1000e6);
+		assertEq(coin.balanceOf(u2), 1000e6);
 	}
 
 	function test_refundGroup_revertsWhileMemberIsFrozen() public {
@@ -896,8 +922,10 @@ contract ArenaMachineTest is Test {
 		arena.freezeLineup(a);
 		uint256 deadline = block.timestamp + 1 hours;
 
+		uint128[] memory amounts = _groupRefundAmounts(ids);
+		bytes memory signature = _signRefundGroup(GROUP, ids, deadline);
 		vm.expectRevert(ArenaMachine.LineupNotActive.selector);
-		arena.refundGroup(GROUP, ids, REASON_HASH, deadline, _signRefundGroup(GROUP, ids, deadline));
+		arena.refundGroup(GROUP, ids, amounts, REASON_HASH, deadline, signature);
 	}
 
 	function test_refundGroup_refundsRevealedMembers() public {
@@ -910,7 +938,10 @@ contract ArenaMachineTest is Test {
 		_settleMarkets();
 		_settleLineup(a, _picks());
 		uint256 deadline = block.timestamp + 1 hours;
-		arena.refundGroup(GROUP, ids, REASON_HASH, deadline, _signRefundGroup(GROUP, ids, deadline));
+		_refundGroup(GROUP, ids, deadline);
+		assertEq(uint256(arena.getLineup(a).owed), 10e6);
+		_claim(a);
+		_claim(b);
 		assertEq(coin.balanceOf(u1), 1000e6);
 		assertEq(coin.balanceOf(u2), 1000e6);
 	}
@@ -923,25 +954,16 @@ contract ArenaMachineTest is Test {
 		ids[1] = b;
 		_assign(GROUP, ids);
 		uint256 deadline = block.timestamp + 1 hours;
-		arena.refundGroup(GROUP, ids, REASON_HASH, deadline, _signRefundGroup(GROUP, ids, deadline));
+		_refundGroup(GROUP, ids, deadline);
 
+		assertEq(arena.getLineup(a).owed, ENTRY_CREDIT);
+		assertEq(credit.balanceOf(address(creditEntry)), ENTRY_CREDIT);
+		_claim(a);
+		_claim(b);
 		assertEq(arena.getLineup(a).owed, 0);
 		assertEq(credit.balanceOf(u1), 100e18);
 		assertEq(credit.balanceOf(address(creditEntry)), 0);
 		assertEq(arena.pending_credit_recycle(1), 0);
-	}
-
-	function test_refundUngrouped() public {
-		uint256 a = _place(u1Pk, _picks(), ENTRY_COIN, TOKEN_COIN);
-		uint256 dl = block.timestamp + 1 hours;
-		bytes32 h =
-			keccak256(abi.encode(REFUND_UNGROUPED_TH, block.chainid, address(arena), a, REASON_HASH, dl)).toEthSignedMessageHash();
-		(uint8 v, bytes32 r, bytes32 s) = vm.sign(authorityPk, h);
-		arena.refundUngrouped(a, REASON_HASH, dl, abi.encodePacked(r, s, v));
-
-		// single-lineup refund is pushed immediately (not pull-based)
-		assertEq(uint256(arena.getLineup(a).status), STATUS_REFUNDED);
-		assertEq(coin.balanceOf(u1), 1000e6);
 	}
 
 	function test_cancelLineup() public {
@@ -1081,54 +1103,63 @@ contract ArenaMachineTest is Test {
 	}
 
 	function _refundRevealedMember(uint256 lineup_id) internal {
-		ArenaMachine.RefundUngroupedParams[] memory params = new ArenaMachine.RefundUngroupedParams[](1);
-		params[0] = ArenaMachine.RefundUngroupedParams(lineup_id, _picks(), SALT, keccak256(abi.encodePacked(M1, WIN1, M2, WIN2)), REASON_HASH);
+		ArenaMachine.RefundLineupParams[] memory params = new ArenaMachine.RefundLineupParams[](1);
+		params[0] = ArenaMachine.RefundLineupParams(lineup_id, _refundAmount(lineup_id), _picks(), SALT, keccak256(abi.encodePacked(M1, WIN1, M2, WIN2)), REASON_HASH);
 		_sendRefundBatch(params);
 	}
 
-	function _refundBatch(uint8 token_type) internal returns (ArenaMachine.RefundUngroupedParams[] memory params) {
+	function _refundBatch(uint8 token_type) internal returns (ArenaMachine.RefundLineupParams[] memory params) {
 		registry.ensureExists(M1);
 		registry.ensureExists(M2);
-		params = new ArenaMachine.RefundUngroupedParams[](2);
-		params[0] = ArenaMachine.RefundUngroupedParams(_place(u1Pk, _picks(), ENTRY_COIN, token_type), _picks(), SALT, keccak256(""), REASON_HASH);
-		params[1] = ArenaMachine.RefundUngroupedParams(_place(u2Pk, _picks(), ENTRY_COIN, token_type), _picks(), SALT, keccak256(""), REASON_HASH);
+		uint256 first = _place(u1Pk, _picks(), ENTRY_COIN, token_type);
+		uint256 second = _place(u2Pk, _picks(), ENTRY_COIN, token_type);
+		params = new ArenaMachine.RefundLineupParams[](2);
+		params[0] = ArenaMachine.RefundLineupParams(first, _refundAmount(first), _picks(), SALT, keccak256(""), REASON_HASH);
+		params[1] = ArenaMachine.RefundLineupParams(second, _refundAmount(second), _picks(), SALT, keccak256(""), REASON_HASH);
 	}
 
-	function _signRefundBatch(ArenaMachine.RefundUngroupedParams[] memory params, uint256 deadline, uint256 chain_id, address target)
+	function _signRefundBatch(ArenaMachine.RefundLineupParams[] memory params, uint256 deadline, uint256 chain_id, address target)
 		internal view returns (bytes memory)
 	{
-		bytes32 hash = keccak256(abi.encode(keccak256("arenaBatchRefundUngrouped"), chain_id, target, params, deadline));
+		bytes32 hash = keccak256(abi.encode(keccak256("arenaBatchRefundLineups"), chain_id, target, params, deadline));
 		(uint8 v, bytes32 r, bytes32 s) = vm.sign(authorityPk, hash.toEthSignedMessageHash());
 		return abi.encodePacked(r, s, v);
 	}
 
-	function _sendRefundBatch(ArenaMachine.RefundUngroupedParams[] memory params) internal {
+	function _sendRefundBatch(ArenaMachine.RefundLineupParams[] memory params) internal {
 		uint256 deadline = block.timestamp + 100;
-		arena.batchRefundUngrouped(params, deadline, _signRefundBatch(params, deadline, block.chainid, address(arena)));
+		arena.batchRefundLineups(params, deadline, _signRefundBatch(params, deadline, block.chainid, address(arena)));
 	}
 
-	function testFuzz_batchRefundUngroupedPaysFullEntryAllTokens(uint8 token_type) public {
+	function _claim(uint256 lineup_id) internal {
+		arena.claimRefund(lineup_id);
+	}
+
+	function testFuzz_batchRefundLineupsPaysFullEntryAllTokens(uint8 token_type) public {
 		token_type = uint8(bound(token_type, 0, 2));
-		ArenaMachine.RefundUngroupedParams[] memory params = _refundBatch(token_type);
+		ArenaMachine.RefundLineupParams[] memory params = _refundBatch(token_type);
 		uint256 before_balance = token_type == 0 ? coin.balanceOf(u1) : credit.balanceOf(u1);
 		uint256 amount = token_type == 0 ? 10e6 : ENTRY_COIN;
 		uint256 prize_before = coin.balanceOf(address(prize));
 		vm.expectEmit(true, true, false, true, address(arena));
 		emit ArenaMachine.LineupRefunded(params[0].lineup_id, u1, amount, REASON_HASH);
 		_sendRefundBatch(params);
-		assertEq(token_type == 0 ? coin.balanceOf(u1) : credit.balanceOf(u1), before_balance + amount);
+		assertEq(token_type == 0 ? coin.balanceOf(u1) : credit.balanceOf(u1), before_balance);
 		assertEq(coin.balanceOf(address(prize)), prize_before);
 		for (uint256 i = 0; i < params.length; ++i) {
 			assertEq(arena.getLineup(params[i].lineup_id).status, STATUS_REFUNDED);
+			assertEq(arena.getLineup(params[i].lineup_id).owed, amount);
+			_claim(params[i].lineup_id);
 			assertEq(arena.getLineup(params[i].lineup_id).owed, 0);
 		}
+		assertEq(token_type == 0 ? coin.balanceOf(u1) : credit.balanceOf(u1), before_balance + amount);
 		vm.expectRevert(ArenaMachine.LineupNotActive.selector);
 		_sendRefundBatch(params);
 	}
 
 	function testFuzz_batchRefundGroupedPaysImmediatelyAndFinalizesWithoutDoublePay(uint8 token_type, bool revealed) public {
 		token_type = uint8(bound(token_type, 0, 2));
-		ArenaMachine.RefundUngroupedParams[] memory params = _refundBatch(token_type);
+		ArenaMachine.RefundLineupParams[] memory params = _refundBatch(token_type);
 		uint256[] memory ids = new uint256[](2);
 		ids[0] = params[0].lineup_id;
 		ids[1] = params[1].lineup_id;
@@ -1140,24 +1171,29 @@ contract ArenaMachineTest is Test {
 			params[1].market_results_hash = params[0].market_results_hash;
 		}
 		uint256 before_balance = token_type == 0 ? coin.balanceOf(u1) : credit.balanceOf(u1);
+		uint256 amount = token_type == 0 ? 10e6 : ENTRY_COIN;
 		_sendRefundBatch(params);
+		assertEq(token_type == 0 ? coin.balanceOf(u1) : credit.balanceOf(u1), before_balance);
+		assertEq(arena.getLineup(ids[0]).owed, amount);
+		_claim(ids[0]);
+		_claim(ids[1]);
 		uint256 refunded_balance = token_type == 0 ? coin.balanceOf(u1) : credit.balanceOf(u1);
-		assertEq(refunded_balance, before_balance + (token_type == 0 ? 10e6 : ENTRY_COIN));
+		assertEq(refunded_balance, before_balance + amount);
 		uint256 deadline = block.timestamp + 100;
-		arena.refundGroup(GROUP, ids, REASON_HASH, deadline, _signRefundGroup(GROUP, ids, deadline));
+		_refundGroup(GROUP, ids, deadline);
 		assertEq(token_type == 0 ? coin.balanceOf(u1) : credit.balanceOf(u1), refunded_balance);
 		assertEq(arena.getGroup(GROUP).status, 2);
 		vm.expectRevert(ArenaMachine.NothingToClaim.selector);
-		arena.claim(ids[0]);
+		arena.claimRefund(ids[0]);
 	}
 
 	function test_refundBeforeRevealThenSettleRemainingMember() public {
-		ArenaMachine.RefundUngroupedParams[] memory params = _refundBatch(0);
+		ArenaMachine.RefundLineupParams[] memory params = _refundBatch(0);
 		uint256[] memory ids = new uint256[](2);
 		ids[0] = params[0].lineup_id;
 		ids[1] = params[1].lineup_id;
 		_assign(GROUP, ids);
-		ArenaMachine.RefundUngroupedParams[] memory one = new ArenaMachine.RefundUngroupedParams[](1);
+		ArenaMachine.RefundLineupParams[] memory one = new ArenaMachine.RefundLineupParams[](1);
 		one[0] = params[0];
 		vm.recordLogs();
 		_sendRefundBatch(one);
@@ -1177,15 +1213,16 @@ contract ArenaMachineTest is Test {
 			}
 		}
 		assertEq(settled_count, 1);
-		arena.claim(ids[1]);
+		_claim(ids[0]);
+		arena.claimPrize(ids[1]);
 		assertEq(coin.balanceOf(u1), 1000e6);
 		assertEq(coin.balanceOf(u2), 1010e6);
 		vm.expectRevert(ArenaMachine.GroupNotActive.selector);
 		_sendRefundBatch(one);
 	}
 
-	function test_batchRefundUngroupedMixedLosingAndUnsettled() public {
-		ArenaMachine.RefundUngroupedParams[] memory params = _refundBatch(0);
+	function test_batchRefundLineupsMixedLosingAndUnsettled() public {
+		ArenaMachine.RefundLineupParams[] memory params = _refundBatch(0);
 		registry.setSettled(M1, WIN1); // Selected outcome is 1: losses are refundable too.
 		params[0].market_results_hash = keccak256(abi.encodePacked(M1, WIN1));
 		params[1].market_results_hash = params[0].market_results_hash;
@@ -1193,8 +1230,8 @@ contract ArenaMachineTest is Test {
 		assertEq(arena.getLineup(params[1].lineup_id).status, STATUS_REFUNDED);
 	}
 
-	function test_batchRefundUngroupedIncludesVoidAndEverySettledMarket() public {
-		ArenaMachine.RefundUngroupedParams[] memory params = _refundBatch(0);
+	function test_batchRefundLineupsIncludesVoidAndEverySettledMarket() public {
+		ArenaMachine.RefundLineupParams[] memory params = _refundBatch(0);
 		registry.setSettled(M1, bytes12(0));
 		registry.setSettled(M2, WIN2);
 		params[0].market_results_hash = keccak256(abi.encodePacked(M1, bytes12(0), M2, WIN2));
@@ -1202,9 +1239,9 @@ contract ArenaMachineTest is Test {
 		_sendRefundBatch(params);
 	}
 
-	function testFuzz_batchRefundUngroupedInvalidMemberRollsBack(uint8 failure) public {
+	function testFuzz_batchRefundLineupsInvalidMemberRollsBack(uint8 failure) public {
 		failure = uint8(bound(failure, 0, 8));
-		ArenaMachine.RefundUngroupedParams[] memory params = _refundBatch(0);
+		ArenaMachine.RefundLineupParams[] memory params = _refundBatch(0);
 		uint256 before_balance = coin.balanceOf(u1);
 		if (failure == 0) {
 			params[1].salt = bytes32(uint256(1));
@@ -1222,7 +1259,7 @@ contract ArenaMachineTest is Test {
 			ids[0] = params[1].lineup_id;
 			_assign(GROUP, ids);
 			uint256 dl = block.timestamp + 100;
-			arena.refundGroup(GROUP, ids, REASON_HASH, dl, _signRefundGroup(GROUP, ids, dl));
+			_refundGroup(GROUP, ids, dl);
 		} else if (failure == 6) {
 			registry.setSettled(M1, WIN1); // stale signed empty results hash
 		} else if (failure == 7) {
@@ -1233,12 +1270,12 @@ contract ArenaMachineTest is Test {
 		uint256 deadline = block.timestamp + 100;
 		bytes memory signature = _signRefundBatch(params, deadline, block.chainid, address(arena));
 		vm.expectRevert();
-		arena.batchRefundUngrouped(params, deadline, signature);
+		arena.batchRefundLineups(params, deadline, signature);
 		assertEq(arena.getLineup(params[0].lineup_id).status, 0);
 		assertEq(coin.balanceOf(u1), before_balance);
 	}
 
-	function testFuzz_batchRefundUngroupedCanonicalRevealRequired(uint8 failure) public {
+	function testFuzz_batchRefundLineupsCanonicalRevealRequired(uint8 failure) public {
 		failure = uint8(bound(failure, 0, 3));
 		ArenaMachine.Pick[] memory picks = _picks();
 		if (failure == 0) {
@@ -1257,17 +1294,17 @@ contract ArenaMachineTest is Test {
 			place.automated_authority_signature = _signPlaceAuthority(place);
 		}
 		arena.placeLineup(place);
-		ArenaMachine.RefundUngroupedParams[] memory params = new ArenaMachine.RefundUngroupedParams[](1);
-		params[0] = ArenaMachine.RefundUngroupedParams(0, picks, SALT, keccak256(""), REASON_HASH);
+		ArenaMachine.RefundLineupParams[] memory params = new ArenaMachine.RefundLineupParams[](1);
+		params[0] = ArenaMachine.RefundLineupParams(0, _refundAmount(0), picks, SALT, keccak256(""), REASON_HASH);
 		uint256 deadline = block.timestamp + 100;
 		bytes memory signature = _signRefundBatch(params, deadline, block.chainid, address(arena));
 		vm.expectRevert(ArenaMachine.InvalidInput.selector);
-		arena.batchRefundUngrouped(params, deadline, signature);
+		arena.batchRefundLineups(params, deadline, signature);
 	}
 
-	function testFuzz_batchRefundUngroupedSignatureBindsWholeBatch(uint8 failure) public {
+	function testFuzz_batchRefundLineupsSignatureBindsWholeBatch(uint8 failure) public {
 		failure = uint8(bound(failure, 0, 7));
-		ArenaMachine.RefundUngroupedParams[] memory params = _refundBatch(0);
+		ArenaMachine.RefundLineupParams[] memory params = _refundBatch(0);
 		uint256 deadline = block.timestamp + 100;
 		bytes memory signature = _signRefundBatch(params, deadline, failure == 0 ? block.chainid + 1 : block.chainid, failure == 1 ? address(123) : address(arena));
 		if (failure == 2) {
@@ -1284,22 +1321,22 @@ contract ArenaMachineTest is Test {
 			vm.warp(deadline + 1);
 		}
 		vm.expectRevert(failure == 7 ? ArenaMachine.SignatureExpired.selector : ArenaMachine.InvalidSignature.selector);
-		arena.batchRefundUngrouped(params, deadline, signature);
+		arena.batchRefundLineups(params, deadline, signature);
 	}
 
-	function test_batchRefundUngroupedEmptyAndMalformedRegistry() public {
-		ArenaMachine.RefundUngroupedParams[] memory empty = new ArenaMachine.RefundUngroupedParams[](0);
+	function test_batchRefundLineupsEmptyAndMalformedRegistry() public {
+		ArenaMachine.RefundLineupParams[] memory empty = new ArenaMachine.RefundLineupParams[](0);
 		vm.expectRevert(ArenaMachine.InvalidInput.selector);
-		arena.batchRefundUngrouped(empty, block.timestamp + 100, "");
-		ArenaMachine.RefundUngroupedParams[] memory params = _refundBatch(0);
+		arena.batchRefundLineups(empty, block.timestamp + 100, "");
+		ArenaMachine.RefundLineupParams[] memory params = _refundBatch(0);
 		vm.etch(address(registry), hex"00");
 		uint256 deadline = block.timestamp + 100;
 		bytes memory signature = _signRefundBatch(params, deadline, block.chainid, address(arena));
 		vm.expectRevert();
-		arena.batchRefundUngrouped(params, deadline, signature);
+		arena.batchRefundLineups(params, deadline, signature);
 	}
 
-	function test_batchRefundUngroupedTypescriptParity() public pure {
+	function test_batchRefundLineupsTypescriptParity() public pure {
 		// Same fixed vector and viem-produced personal-sign signature as core-domain test.
 		ArenaMachine.Pick[] memory picks = new ArenaMachine.Pick[](2);
 		picks[0] = ArenaMachine.Pick(bytes12(uint96(1)), bytes12(uint96(0x64)), bytes8(0));
@@ -1307,26 +1344,30 @@ contract ArenaMachineTest is Test {
 		bytes32 salt = 0x1212121212121212121212121212121212121212121212121212121212121212;
 		bytes32 results_hash = keccak256(abi.encodePacked(bytes12(uint96(1)), bytes12(0)));
 		assertEq(results_hash, 0x012ca6994aaac2a19371dc816add011ff6915c66948e7eebf8b44ef89b99446f);
-		ArenaMachine.RefundUngroupedParams[] memory params = new ArenaMachine.RefundUngroupedParams[](2);
-		params[0] = ArenaMachine.RefundUngroupedParams(1, picks, salt, results_hash, REASON_HASH);
-		params[1] = ArenaMachine.RefundUngroupedParams(2, picks, salt, results_hash, REASON_HASH);
-		bytes32 hash = keccak256(abi.encode(keccak256("arenaBatchRefundUngrouped"), uint256(8453), address(0x123), params, uint256(1767225600)));
-		assertEq(hash, 0x09b30661f5f53badc48e187d6715892b94403cc019358689897310e07687139a);
+		ArenaMachine.RefundLineupParams[] memory params = new ArenaMachine.RefundLineupParams[](2);
+		params[0] = ArenaMachine.RefundLineupParams(1, uint128(10e6), picks, salt, results_hash, REASON_HASH);
+		params[1] = ArenaMachine.RefundLineupParams(2, uint128(10e6), picks, salt, results_hash, REASON_HASH);
+		bytes32 hash = keccak256(abi.encode(keccak256("arenaBatchRefundLineups"), uint256(8453), address(0x123), params, uint256(1767225600)));
+		assertEq(hash, 0x216717faba391602e51beb42df6dadc5ca0dcc9506846b75e5a1ad5874825d10);
 		assertEq(keccak256(abi.encode(PICKS_COMMITMENT_TYPEHASH, uint256(8453), address(0x123), address(0xdead), picks, salt)), 0x0119d847d208ea19acfda13a7d33be58109120a8ee81ce4f2e53df646701cc02);
-		bytes memory signature = hex"2b36320068a43278a9ab92e16329640218abf509b22d74409e0f6daaab7097647ec8650c2b454a211035eee1a35d681613d7ac8e1ae84cc1c5266c7c602013841b";
+		bytes memory signature = hex"d98b5ad8f1259368fa0c9d53276b87188f29bf77d7788a423cc6701151ee8f2332f5580bd102d10f9aa364023c4e2b7384a81778329a39280950612dc2061f1a1b";
 		assertEq(ECDSA.recover(hash.toEthSignedMessageHash(), signature), 0x19E7E376E7C213B7E7e7e46cc70A5dD086DAff2A);
 	}
 
-	function test_batchRefundUngroupedVaultFailureRollsBackAllMembers() public {
-		ArenaMachine.RefundUngroupedParams[] memory params = _refundBatch(0);
+	function test_batchRefundLineupsVaultFailureRollsBackAllMembers() public {
+		ArenaMachine.RefundLineupParams[] memory params = _refundBatch(0);
 		uint256 before_balance = coin.balanceOf(u1);
+		_sendRefundBatch(params);
+		assertEq(arena.getLineup(params[0].lineup_id).status, STATUS_REFUNDED);
+		assertEq(arena.getLineup(params[0].lineup_id).owed, 10e6);
 		vm.mockCallRevert(address(entry), abi.encodeWithSignature("payout(address,address,uint256)", u2, address(coin), uint256(10e6)), "vault-failed");
-		uint256 deadline = block.timestamp + 100;
-		bytes memory signature = _signRefundBatch(params, deadline, block.chainid, address(arena));
+		uint256[] memory ids = new uint256[](2);
+		ids[0] = params[0].lineup_id;
+		ids[1] = params[1].lineup_id;
 		vm.expectRevert();
-		arena.batchRefundUngrouped(params, deadline, signature);
-		assertEq(arena.getLineup(params[0].lineup_id).status, 0);
-		assertEq(arena.getLineup(params[1].lineup_id).status, 0);
+		arena.batchClaimRefund(ids);
+		assertEq(arena.getLineup(params[0].lineup_id).owed, 10e6);
+		assertEq(arena.getLineup(params[1].lineup_id).owed, 10e6);
 		assertEq(coin.balanceOf(u1), before_balance);
 	}
 }
