@@ -2,7 +2,7 @@
 	"name": "@maginot/contracts",
 	"version": "0.0.1",
 	"private": true,
-	"description": "Smart contracts for Maginot betting platform",
+	"description": "Picks Arena contest contracts",
 	"scripts": {
 		"build": "forge build",
 		"test": "forge test",

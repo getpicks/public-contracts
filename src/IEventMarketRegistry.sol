@@ -5,15 +5,14 @@ interface IEventMarketRegistry {
 	struct EventMarket {
 		bool is_exists;
 		bool is_settled;
-		uint40 min_settlement_ts;
+		uint40 _reserved;
 		bytes12 winning_outcome_id;
 	}
 
 	/// @notice Ensures an event market exists, creating it if necessary
-	/// @dev Idempotent: creates if not exists, validates if exists (not settled, betting window open)
+	/// @dev Idempotent: creates if not exists, validates if exists (not settled)
 	/// @param event_market_id The event market ID
-	/// @param min_settlement_ts Minimum settlement timestamp (only used for creation)
-	function ensureExists(bytes12 event_market_id, uint40 min_settlement_ts) external;
+	function ensureExists(bytes12 event_market_id) external;
 
 	/// @notice Returns full event market data
 	/// @param event_market_id The event market ID
