@@ -36,19 +36,20 @@ interface IArenaVaultPolicy {
 ///           requires every referenced EventMarketRegistry market to be settled, then
 ///           marks the lineup settled. No scoring.
 ///
-///         Layer 2 — settleGroup(): the server computes payouts off-chain and submits
+///         Layer 2 — settleGroup(): the server computes prizes off-chain and submits
 ///           per-member (amount, outcome), bounds each amount, records `owed`
-///           (pull-based) and
-///           sets status. Winners claim() from the PrizeTreasury; refunds from the
-///           EntryVault; the two vaults never commingle (spec §7).
+///           and sets status. Winners pull via claimPrize() from the PrizeTreasury.
+///           Refunds are marked separately (owed from EntryVault) and pulled via
+///           claimRefund(). The two vaults never commingle (spec §7).
 ///
 ///         Groups are matched off-chain; the group id is derived off-chain (from the
 ///         matchmaker's variables) and passed in — the contract only requires it is
 ///         unique and binds the frozen member set via members_hash.
 ///
-/// @dev On-chain guards (rules trusted; inputs + funds are not): refund <= entry,
-///      win <= max_multiplier * entry (locked at placement), PrizeTreasury floor,
-///      settled-market verification, pull-based auditable `owed`. Holds no funds itself.
+/// @dev On-chain guards (rules trusted; inputs + funds are not): refund amount must
+///      equal the full entry, win <= max_multiplier * entry (locked at placement),
+///      PrizeTreasury floor, settled-market verification, pull-based auditable `owed`.
+///      Holds no funds itself.
 contract ArenaMachine is Initializable, Pausable {
     using ECDSA for bytes32;
     using MessageHashUtils for bytes32;
@@ -67,7 +68,7 @@ contract ArenaMachine is Initializable, Pausable {
     // ─── Lineup status ───
     uint8 internal constant STATUS_ACTIVE = 0; // placed, not yet layer-1 settled
     uint8 internal constant STATUS_FROZEN = 1; // admin hold — blocks group settlement
-    uint8 internal constant STATUS_SETTLED = 2; // reveal verified (layer 1); win owed>0 / lost owed==0
+    uint8 internal constant STATUS_SETTLED = 2; // layer-1 reveal verified; after settleGroup, win owed>0 / loss owed==0
     uint8 internal constant STATUS_REFUNDED = 3; // full refund owed from EntryVault
     uint8 internal constant STATUS_CANCELED = 4; // user cancel (refunded at cancel time)
 
@@ -143,7 +144,7 @@ contract ArenaMachine is Initializable, Pausable {
     struct SettleGroupParams {
         bytes32 group_id;
         uint256[] member_lineup_ids; // sorted ascending, == the frozen member set
-        uint128[] amounts; // destination token decimals (win: prize token; refund: entry token)
+        uint128[] amounts; // prize-token decimals; loss must be 0
         uint8[] outcomes; // per member OUTCOME_*
         uint256 deadline;
         bytes automated_authority_signature;
@@ -347,7 +348,7 @@ contract ArenaMachine is Initializable, Pausable {
             })
         );
 
-        // wallet_nonce is emitted so the off-chain worker can recompute the queued bet's deterministic
+        // wallet_nonce is emitted so the off-chain worker can recompute the queued lineup's deterministic
         // id (hash(chain, this, owner, nonce)) and correlate this on-chain lineup back to it.
         emit LineupPlaced(
             lineups.length - 1, params.owner_address, params.vault_pair_id, params.size, params.token_type, nonce
@@ -456,8 +457,8 @@ contract ArenaMachine is Initializable, Pausable {
 
     // ─── Layer 1: reveal and registry verification ───
 
-    /// @notice Locks a lineup's market outcomes. Reverts unless every pick's market is
-    ///         settled and the recomputed market-results hash matches the server's.
+    /// @notice Reveals a lineup's picks. Reverts unless the commitment matches and every
+    ///         referenced market is settled on the registry. No scoring and no `owed`.
     function settleLineup(SettleLineupParams calldata params) external whenNotPaused {
         if (block.timestamp > params.deadline) revert SignatureExpired();
 
@@ -903,7 +904,7 @@ contract ArenaMachine is Initializable, Pausable {
     function freezeLineup(uint256 lineup_id) external onlyAutomatedAuthority {
         Lineup storage lineup = lineups[_requireLineup(lineup_id)];
         // Only hold a lineup BEFORE its group settles. Freezing a group-settled lineup would
-        // strand its `owed` (unfreeze returns it to ACTIVE, and claim requires SETTLED/REFUNDED).
+        // strand its `owed` (unfreeze returns it to ACTIVE; claimPrize needs SETTLED, claimRefund needs REFUNDED).
         bool freezable = lineup.status == STATUS_ACTIVE
             || (lineup.status == STATUS_SETTLED && groups[lineup.group_id].status == GROUP_STATUS_ACTIVE);
         if (!freezable) revert InvalidInput();
