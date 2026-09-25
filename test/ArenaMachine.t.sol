@@ -260,6 +260,14 @@ contract ArenaMachineTest is Test {
 	}
 
 	function _signPlaceAuthority(ArenaMachine.PlaceLineupParams memory p) internal view returns (bytes memory) {
+		return _signPlaceAuthority(p, arena.wallet_nonce(p.owner_address));
+	}
+
+	function _signPlaceAuthority(ArenaMachine.PlaceLineupParams memory p, uint256 nonce)
+		internal
+		view
+		returns (bytes memory)
+	{
 		bytes32 h = keccak256(
 				abi.encode(
 					PLACE_AUTH_TH,
@@ -271,6 +279,7 @@ contract ArenaMachineTest is Test {
 					p.vault_pair_id,
 					p.max_multiplier,
 					p.owner_address,
+					nonce,
 					p.deadline
 				)
 			).toEthSignedMessageHash();
@@ -491,6 +500,16 @@ contract ArenaMachineTest is Test {
 		vm.prank(owner);
 		vm.expectRevert(ArenaMachine.InvalidInput.selector);
 		arena.setTokenTypeVaultPair(TOKEN_CREDIT_PRIZE, 0);
+	}
+
+	function test_placeLineup_authoritySignatureDoesNotReplayAcrossNonces() public {
+		ArenaMachine.PlaceLineupParams memory first = _buildPlace(u1Pk, _picks(), ENTRY_COIN, TOKEN_COIN);
+		bytes memory authority_signature = first.automated_authority_signature;
+		arena.placeLineup(first);
+		ArenaMachine.PlaceLineupParams memory replay = _buildPlace(u1Pk, _picks(), ENTRY_COIN, TOKEN_COIN);
+		replay.automated_authority_signature = authority_signature;
+		vm.expectRevert(ArenaMachine.InvalidSignature.selector);
+		arena.placeLineup(replay);
 	}
 
 	function test_placeLineup_revertsOnTamperedCommitment() public {
@@ -877,6 +896,17 @@ contract ArenaMachineTest is Test {
 		vm.expectRevert(ArenaMachine.InvalidInput.selector);
 		arena.batchRefundLineups(params, deadline, signature);
 		assertEq(arena.getLineup(params[0].lineup_id).status, 0);
+	}
+
+	function test_batchRefund_zeroAmountMarksWithoutOwed() public {
+		ArenaMachine.RefundLineupParams[] memory params = _refundBatch(TOKEN_COIN);
+		params[0].amount = 0;
+		params[1].amount = 0;
+		_sendRefundBatch(params);
+		assertEq(arena.getLineup(params[0].lineup_id).status, STATUS_REFUNDED);
+		assertEq(arena.getLineup(params[0].lineup_id).owed, 0);
+		vm.expectRevert(ArenaMachine.NothingToClaim.selector);
+		arena.claimRefund(params[0].lineup_id);
 	}
 
 	function test_refundGroup_refundsEveryMember() public {

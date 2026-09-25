@@ -386,6 +386,7 @@ contract ArenaMachine is Initializable, Pausable {
                     params.vault_pair_id,
                     params.max_multiplier,
                     params.owner_address,
+                    nonce,
                     params.deadline
                 )
             );
@@ -711,7 +712,8 @@ contract ArenaMachine is Initializable, Pausable {
     function _markRefund(uint256 lineup_id, uint128 amount, bytes32 reason_hash) internal {
         if (reason_hash == bytes32(0)) revert InvalidInput();
         Lineup storage lineup = lineups[lineup_id];
-        if (amount != _fullRefundAmount(lineup)) revert InvalidInput();
+        // 0 returns no funds (refund_policy 1). Otherwise amount must be the full entry.
+        if (amount != 0 && amount != _fullRefundAmount(lineup)) revert InvalidInput();
         lineup.owed = amount;
         emit LineupRefunded(lineup_id, lineup.owner, amount, reason_hash);
     }
