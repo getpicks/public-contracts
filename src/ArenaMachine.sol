@@ -182,8 +182,8 @@ contract ArenaMachine is Initializable, Pausable {
     // Authority-approved payout ceiling (hundredths). A cap of 0 allows no placements.
     uint64 public max_multiplier_cap;
 
-    // Protocol-level safety ceilings. Pick-count limits are verified when picks are revealed;
-    // placement remains private and is preflighted against the same values by the authority.
+    // Group-size safety ceiling and admission pick-count policy. Placement remains private;
+    // the authority checks pick counts before signing. New limits never restrict existing reveals.
     uint16 public max_group_size;
     uint16 public min_picks_count;
     uint16 public max_picks_count;
@@ -510,9 +510,6 @@ contract ArenaMachine is Initializable, Pausable {
     }
 
     function _settleLineup(uint256 lineup_id, Pick[] calldata picks, bytes32 salt) internal {
-        uint256 picks_count = picks.length;
-        if (picks_count < min_picks_count || picks_count > max_picks_count) revert InvalidInput();
-
         Lineup storage lineup = lineups[_requireLineup(lineup_id)];
         if (lineup.status != STATUS_ACTIVE) revert LineupNotActive();
         if (lineup.group_id == bytes32(0)) revert LineupNotActive(); // must be grouped first
@@ -741,7 +738,6 @@ contract ArenaMachine is Initializable, Pausable {
             RefundLineupParams calldata param = params[i];
             Lineup storage lineup = lineups[_requireLineup(param.lineup_id)];
             _requireRefundable(lineup);
-            if (param.picks.length < min_picks_count || param.picks.length > max_picks_count) revert InvalidInput();
             if (_computePicksHash(lineup.owner, param.picks, param.salt) != lineup.picks_hash) revert InvalidInput();
             if (_settledMarketResultsHash(param.picks) != param.market_results_hash) revert InvalidInput();
             lineup.status = STATUS_REFUNDED; // also rejects duplicate members
@@ -995,7 +991,8 @@ contract ArenaMachine is Initializable, Pausable {
         emit MaxGroupSizeUpdated(_max_group_size);
     }
 
-    /// @notice Configures the accepted pick-count range. Limits are enforced at reveal.
+    /// @notice Configures the pick-count admission policy checked off-chain by the authority.
+    /// @dev Does not restrict settlement or refund of already-committed lineups.
     function setPickCountLimits(uint16 _min_picks_count, uint16 _max_picks_count) external onlyOwner {
         if (_min_picks_count == 0 || _min_picks_count > _max_picks_count) revert InvalidInput();
         min_picks_count = _min_picks_count;

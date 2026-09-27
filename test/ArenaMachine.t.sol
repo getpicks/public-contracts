@@ -636,7 +636,7 @@ contract ArenaMachineTest is Test {
 		arena.settleLineup(p);
 	}
 
-	function test_settleLineup_enforcesCurrentPickCountLimits() public {
+	function test_settleLineup_ignoresChangedPickCountLimits() public {
 		uint256 two_pick_lineup = _place(u1Pk, _picks(), ENTRY_COIN, TOKEN_COIN);
 		uint256 three_pick_lineup = _place(u2Pk, _threePicks(), ENTRY_COIN, TOKEN_COIN);
 		uint256[] memory ids = new uint256[](2);
@@ -648,14 +648,25 @@ contract ArenaMachineTest is Test {
 		vm.prank(owner);
 		arena.setPickCountLimits(3, 6);
 		ArenaMachine.SettleLineupParams memory two_pick_params = _buildSettleLineup(two_pick_lineup, _picks());
-		vm.expectRevert(ArenaMachine.InvalidInput.selector);
 		arena.settleLineup(two_pick_params);
+		assertEq(arena.getLineup(two_pick_lineup).status, STATUS_SETTLED);
 
 		vm.prank(owner);
 		arena.setPickCountLimits(2, 2);
 		ArenaMachine.SettleLineupParams memory three_pick_params = _buildSettleLineup(three_pick_lineup, _threePicks());
-		vm.expectRevert(ArenaMachine.InvalidInput.selector);
 		arena.settleLineup(three_pick_params);
+		assertEq(arena.getLineup(three_pick_lineup).status, STATUS_SETTLED);
+
+		uint128[] memory amounts = new uint128[](2);
+		uint8[] memory outcomes = new uint8[](2);
+		amounts[0] = 20e6;
+		outcomes[0] = OUTCOME_WIN;
+		outcomes[1] = OUTCOME_LOST;
+		_settleGroup(GROUP, ids, amounts, outcomes);
+		assertEq(arena.getGroup(GROUP).status, 1);
+		uint256 before_balance = coin.balanceOf(u1);
+		arena.claimPrize(two_pick_lineup);
+		assertEq(coin.balanceOf(u1), before_balance + 20e6);
 	}
 
 	function test_settleLineup_revertsOnWrongSalt() public {
@@ -1163,6 +1174,38 @@ contract ArenaMachineTest is Test {
 
 	function _claim(uint256 lineup_id) internal {
 		arena.claimRefund(lineup_id);
+	}
+
+	function test_batchRefundLineups_ignoresChangedPickCountLimits() public {
+		registry.ensureExists(M1);
+		registry.ensureExists(M2);
+		registry.ensureExists(M3);
+		uint256 two_pick_lineup = _place(u1Pk, _picks(), ENTRY_COIN, TOKEN_COIN);
+		uint256 three_pick_lineup = _place(u2Pk, _threePicks(), ENTRY_COIN, TOKEN_COIN);
+		uint256[] memory ids = new uint256[](2);
+		ids[0] = two_pick_lineup;
+		ids[1] = three_pick_lineup;
+		_assign(GROUP, ids);
+
+		ArenaMachine.RefundLineupParams[] memory params = new ArenaMachine.RefundLineupParams[](1);
+		params[0] = ArenaMachine.RefundLineupParams(two_pick_lineup, _refundAmount(two_pick_lineup), _picks(), SALT, keccak256(""), REASON_HASH);
+		vm.prank(owner);
+		arena.setPickCountLimits(3, 6);
+		_sendRefundBatch(params);
+		assertEq(arena.getLineup(two_pick_lineup).status, STATUS_REFUNDED);
+
+		params[0] = ArenaMachine.RefundLineupParams(three_pick_lineup, _refundAmount(three_pick_lineup), _threePicks(), SALT, keccak256(""), REASON_HASH);
+		vm.prank(owner);
+		arena.setPickCountLimits(2, 2);
+		_sendRefundBatch(params);
+		assertEq(arena.getLineup(three_pick_lineup).status, STATUS_REFUNDED);
+
+		uint256 first_balance = coin.balanceOf(u1);
+		uint256 second_balance = coin.balanceOf(u2);
+		_claim(two_pick_lineup);
+		_claim(three_pick_lineup);
+		assertEq(coin.balanceOf(u1), first_balance + 10e6);
+		assertEq(coin.balanceOf(u2), second_balance + 10e6);
 	}
 
 	function testFuzz_batchRefundLineupsPaysFullEntryAllTokens(uint8 token_type) public {

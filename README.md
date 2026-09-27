@@ -117,10 +117,11 @@ When the referenced markets are finalized, the authority reveals `(picks, salt)`
 The machine checks:
 
 - lineup is `ACTIVE` and **already grouped**,
-- pick count is inside `[min_picks_count, max_picks_count]`,
 - `keccak256(typehash, chain, machine, owner, picks, salt) == picks_hash`,
 - market ids are strictly ascending,
 - every market `is_settled` on the registry.
+
+Pick-count limits are admission policy checked off-chain by the authority before signing a placement. Changing them does not restrict reveal or refund of already-committed lineups; the contract verifies the original picks commitment instead.
 
 This only marks the lineup `SETTLED` (revealed). **No score, no `owed`, no transfer.**
 
