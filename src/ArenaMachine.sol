@@ -284,6 +284,8 @@ contract ArenaMachine is Initializable, Pausable {
         if (coin_decimals >= INTERNAL_DECIMALS) revert InvalidInput();
         coin_config = CoinConfig({token_address: _coin_token, decimals: coin_decimals});
         coin_scale = 10 ** (INTERNAL_DECIMALS - coin_decimals);
+        // Credit amounts use internal units directly on every entry, prize and refund path.
+        if (IERC20Metadata(_credit_token).decimals() != INTERNAL_DECIMALS) revert InvalidInput();
         credit_token_address = _credit_token;
         event_market_registry_address = _event_market_registry;
         vault_factory_address = _vault_factory;

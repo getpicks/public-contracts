@@ -31,6 +31,18 @@ contract MockUSDC is ERC20 {
 	}
 }
 
+contract MockTokenWithDecimals is ERC20 {
+	uint8 private immutable token_decimals;
+
+	constructor(uint8 decimals_) ERC20("Test Token", "TEST") {
+		token_decimals = decimals_;
+	}
+
+	function decimals() public view override returns (uint8) {
+		return token_decimals;
+	}
+}
+
 contract MockCreditToken is ERC20 {
 	mapping(address => bool) public whitelisted_addresses;
 
@@ -1112,6 +1124,24 @@ contract ArenaMachineTest is Test {
 		);
 		vm.expectRevert(ArenaMachine.InvalidInput.selector);
 		new TransparentUpgradeableProxy(address(implementation), owner, init_data);
+	}
+
+	function testFuzz_initialize_rejectsNon18DecimalCredit(uint8 credit_decimals) public {
+		vm.assume(credit_decimals != 18);
+		MockTokenWithDecimals bad_credit = new MockTokenWithDecimals(credit_decimals);
+		ArenaMachine implementation = new ArenaMachine();
+		bytes memory init_data = abi.encodeCall(
+			ArenaMachine.initialize,
+			(address(coin), address(bad_credit), address(registry), address(vault_factory), authority, owner)
+		);
+		vm.expectRevert(ArenaMachine.InvalidInput.selector);
+		new TransparentUpgradeableProxy(address(implementation), owner, init_data);
+	}
+
+	function test_initialize_accepts18DecimalCredit() public view {
+		assertEq(credit.decimals(), 18);
+		assertEq(arena.credit_token_address(), address(credit));
+		assertEq(arena.coin_scale(), 1e12);
 	}
 
 	function test_placeLineup_doesNotRevealOrCreateEventMarkets() public {
